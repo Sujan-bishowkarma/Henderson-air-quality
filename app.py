@@ -188,14 +188,14 @@ else:
     c2.metric("Winter average", f"{winter:.1f} µg/m³")
     c3.metric("Winter vs summer", f"{(winter / summer - 1) * 100:+.0f}%")
 
-# ---------- model results (2019 test year) ----------
+# ---------- model results (test set: last 20% of hours) ----------
 
 st.subheader("Next-hour forecast: actual vs predicted")
 
-p_start, p_end = max(start, date(2019, 1, 1)), min(end_excl, date(2020, 1, 1))
+p_start, p_end = max(start, date(2017, 7, 15)), min(end_excl, date(2023, 2, 1))
 
 if p_start >= p_end:
-    st.info("Model predictions are available for the 2019 test year. Choose dates in 2019 to see them.")
+    st.info("Model predictions cover the test set (mid-2017/2018 to January 2023). Choose dates in that period to see them.")
 else:
     pred = load_table("predictions", p_start, p_end, pollutant=pollutant)
     if pred.empty:
