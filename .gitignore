@@ -1,0 +1,5 @@
+   .env
+   *.csv
+   *.xlsx
+   .streamlit/secrets.toml
+   .ipynb_checkpoints/
