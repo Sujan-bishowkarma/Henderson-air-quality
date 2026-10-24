@@ -237,14 +237,24 @@ else:
             polar=dict(angularaxis=dict(direction="clockwise", rotation=90,
                                         tickmode="array", tickvals=[0, 90, 180, 270],
                                         ticktext=["N", "E", "S", "W"]),
-                       radialaxis=dict(title="m/s", range=[0, SPEED_EDGES[-1]])),
+                       radialaxis=dict(range=[0, SPEED_EDGES[-1]], ticksuffix=" m/s",
+                                       tickvals=[2, 4, 6, 8, 10], angle=45, tickangle=45,
+                                       tickfont=dict(size=10))),
         )
         return fig
 
     c_map, c_pm, c_no2 = st.columns([1, 1.4, 1.4])
     with c_map:
         st.markdown("**Monitoring site**")
-        st.map(pd.DataFrame({"lat": [SITE_LAT], "lon": [SITE_LON]}), zoom=11, height=360)
+        site_map = go.Figure(go.Scattermapbox(
+            lat=[SITE_LAT], lon=[SITE_LON], mode="markers+text",
+            marker=dict(size=16, color="#D9692B"),
+            text=["Henderson monitoring site"], textposition="top center",
+            hovertext=["Henderson monitoring site (HEN)"], hoverinfo="text"))
+        site_map.update_layout(
+            mapbox=dict(style="open-street-map", center=dict(lat=SITE_LAT, lon=SITE_LON), zoom=11),
+            height=380, margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
+        st.plotly_chart(site_map, width="stretch")
         st.caption(f"Henderson, Auckland · {len(wind):,} hours with wind direction")
     c_pm.plotly_chart(polar_plot("pm10", "PM10"), width="stretch")
     c_no2.plotly_chart(polar_plot("no2", "NO₂"), width="stretch")
