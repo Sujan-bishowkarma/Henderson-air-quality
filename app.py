@@ -246,14 +246,19 @@ else:
     c_map, c_pm, c_no2 = st.columns([1, 1.4, 1.4])
     with c_map:
         st.markdown("**Monitoring site**")
-        site_map = go.Figure(go.Scattermapbox(
-            lat=[SITE_LAT], lon=[SITE_LON], mode="markers+text",
-            marker=dict(size=16, color="#D9692B"),
-            text=["Henderson monitoring site"], textposition="top center",
-            hovertext=["Henderson monitoring site (HEN)"], hoverinfo="text"))
-        site_map.update_layout(
-            mapbox=dict(style="open-street-map", center=dict(lat=SITE_LAT, lon=SITE_LON), zoom=11),
-            height=380, margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
+        # newer Plotly versions use Scattermap; older ones only have Scattermapbox
+        marker_args = dict(lat=[SITE_LAT], lon=[SITE_LON], mode="markers+text",
+                           marker=dict(size=16, color="#D9692B"),
+                           text=["Henderson monitoring site"], textposition="top center",
+                           hovertext=["Henderson monitoring site (HEN)"], hoverinfo="text")
+        map_settings = dict(style="open-street-map", center=dict(lat=SITE_LAT, lon=SITE_LON), zoom=11)
+        if hasattr(go, "Scattermap"):
+            site_map = go.Figure(go.Scattermap(**marker_args))
+            site_map.update_layout(map=map_settings)
+        else:
+            site_map = go.Figure(go.Scattermapbox(**marker_args))
+            site_map.update_layout(mapbox=map_settings)
+        site_map.update_layout(height=380, margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
         st.plotly_chart(site_map, width="stretch")
         st.caption(f"Henderson, Auckland · {len(wind):,} hours with wind direction")
     c_pm.plotly_chart(polar_plot("pm10", "PM10"), width="stretch")
