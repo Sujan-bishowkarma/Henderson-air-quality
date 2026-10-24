@@ -11,11 +11,15 @@ import joblib
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client
 
 st.set_page_config(page_title="Henderson Air Quality", layout="wide")
+
+# monitoring site location (APPROXIMATE: Henderson, Auckland - replace with the exact site coordinates)
+SITE_LAT, SITE_LON = -36.8786, 174.6302
 
 
 # ---------- connection ----------
@@ -187,6 +191,63 @@ else:
     c1.metric("Summer average", f"{summer:.1f} µg/m³")
     c2.metric("Winter average", f"{winter:.1f} µg/m³")
     c3.metric("Winter vs summer", f"{(winter / summer - 1) * 100:+.0f}%")
+
+
+# ---------- wind direction polar plots ----------
+
+st.subheader("Wind direction and pollution")
+st.caption("Wind direction was only recorded from September 2022 to February 2023, so these plots always use that period. "
+           "Angle = direction the wind blows from (north at the top), distance from centre = wind speed, colour = average concentration.")
+
+WD_START, WD_END = date(2022, 9, 1), date(2023, 3, 1)
+SPEED_EDGES = [0, 1, 2, 3, 4, 6, 11]
+DIRS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+wd = load_table("wind_direction", WD_START, WD_END)
+if wd.empty:
+    st.info("No wind direction data found in the database.")
+else:
+    aq = load_table("air_quality", WD_START, WD_END)
+    wind = aq.merge(wd, on="datetime").dropna(subset=["wd", "ws"])
+
+    # 16 direction sectors of 22.5 degrees, and wind speed bands
+    wind["sector"] = (((wind["wd"] + 11.25) // 22.5) % 16).astype(int)
+    wind["band"] = pd.cut(wind["ws"], SPEED_EDGES, labels=False, include_lowest=True, right=False)
+
+    def polar_plot(col, name):
+        g = (wind.dropna(subset=[col, "band"])
+                 .groupby(["sector", "band"])[col].agg(["mean", "count"]).reset_index())
+        g = g[g["count"] >= 3]                       # skip cells with too few hours
+        lo = [SPEED_EDGES[int(b)] for b in g["band"]]
+        hi = [SPEED_EDGES[int(b) + 1] for b in g["band"]]
+        fig = go.Figure(go.Barpolar(
+            theta=g["sector"] * 22.5,
+            r=[h - l for h, l in zip(hi, lo)],
+            base=lo,
+            width=22.5,
+            marker=dict(color=g["mean"], colorscale="YlOrRd", cmin=0,
+                        colorbar=dict(title="µg/m³"), line=dict(color="white", width=0.5)),
+            customdata=list(zip([DIRS[int(x)] for x in g["sector"]], lo, hi, g["mean"], g["count"])),
+            hovertemplate="%{customdata[0]}, %{customdata[1]}–%{customdata[2]} m/s<br>"
+                          "Average: %{customdata[3]:.1f} µg/m³<br>Hours: %{customdata[4]}<extra></extra>",
+        ))
+        fig.update_layout(
+            title=f"{name} by wind direction and speed",
+            height=460, margin=dict(t=60, b=30, l=30, r=30),
+            polar=dict(angularaxis=dict(direction="clockwise", rotation=90,
+                                        tickmode="array", tickvals=[0, 90, 180, 270],
+                                        ticktext=["N", "E", "S", "W"]),
+                       radialaxis=dict(title="m/s", range=[0, SPEED_EDGES[-1]])),
+        )
+        return fig
+
+    c_map, c_pm, c_no2 = st.columns([1, 1.4, 1.4])
+    with c_map:
+        st.markdown("**Monitoring site**")
+        st.map(pd.DataFrame({"lat": [SITE_LAT], "lon": [SITE_LON]}), zoom=11, height=360)
+        st.caption(f"Henderson, Auckland · {len(wind):,} hours with wind direction")
+    c_pm.plotly_chart(polar_plot("pm10", "PM10"), width="stretch")
+    c_no2.plotly_chart(polar_plot("no2", "NO₂"), width="stretch")
 
 # ---------- model results (test set: last 20% of hours) ----------
 
