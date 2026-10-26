@@ -245,7 +245,8 @@ else:
         )
         return fig
 
-    c_map, c_pm, c_no2 = st.columns([1, 1.4, 1.4])
+    # site map + polar plot of the selected pollutant only
+    c_map, c_polar = st.columns([1, 1.6])
     with c_map:
         st.markdown("**Monitoring site**")
         # newer Plotly versions use Scattermap; older ones only have Scattermapbox
@@ -263,8 +264,7 @@ else:
         site_map.update_layout(height=380, margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
         st.plotly_chart(site_map, width="stretch")
         st.caption(f"Henderson, Auckland · {len(wind):,} hours with wind direction")
-    c_pm.plotly_chart(polar_plot("pm10", "PM10"), width="stretch")
-    c_no2.plotly_chart(polar_plot("no2", "NO₂"), width="stretch")
+    c_polar.plotly_chart(polar_plot(col, "NO₂" if pollutant == "NO2" else "PM10"), width="stretch")
 
 # ---------- model results (test set: last 20% of hours) ----------
 
