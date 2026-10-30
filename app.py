@@ -433,6 +433,31 @@ else:
                 if len(future) == forecast_hours and future.notna().all():
                     observed = float(future.mean())
                     st.caption(f"Observed following {forecast_hours}h: {observed:.2f} µg/m³")
+
+                    # Compare this one historical what-if prediction with its observed outcome.
+                    comparison = go.Figure()
+                    comparison.add_trace(go.Bar(
+                        x=["Predicted", "Observed"],
+                        y=[estimate, observed],
+                        text=[f"{estimate:.2f}", f"{observed:.2f}"],
+                        textposition="outside",
+                        marker_color=["#E58E26", "#3978B9"],
+                        hovertemplate="%{x}: %{y:.2f} µg/m³<extra></extra>",
+                    ))
+                    comparison.update_layout(
+                        title=f"{pollutant}: Actual vs Predicted ({forecast_hours}-hour forecast)",
+                        xaxis_title=None,
+                        yaxis_title="Concentration (µg/m³)",
+                        yaxis=dict(range=[0, max(estimate, observed, 1) * 1.25]),
+                        height=350,
+                        showlegend=False,
+                        margin=dict(t=55, b=35, l=35, r=25),
+                    )
+                    st.plotly_chart(comparison, use_container_width=True)
+                    st.caption(
+                        "Comparison for the selected historical forecast only; "
+                        "the graph is not an overall model performance measure."
+                    )
                 else:
                     st.caption("Actual outcome unavailable or incomplete for this period.")
                 st.caption(f"Saved model: {package['name']} · {len(features)} input features")
