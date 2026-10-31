@@ -1,0 +1,634 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Joint BBIM713 capstone portfolio exploring air quality and predictive analytics in Henderson, Auckland.">
+  <title>Henderson Air | Research Portfolio</title>
+
+  <style>
+    :root {
+      --forest: #234b41;
+      --forest-dark: #15362f;
+      --cream: #f7f5ee;
+      --paper: #fffefa;
+      --ink: #233042;
+      --muted: #67736e;
+      --orange: #c98551;
+      --line: #dddcd2;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--cream);
+      color: var(--ink);
+      font-family: "Segoe UI", Arial, sans-serif;
+      line-height: 1.7;
+    }
+
+    h1, h2, h3 {
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.2;
+      letter-spacing: -.025em;
+    }
+
+    h1 { font-size: clamp(2.8rem, 6vw, 5rem); }
+    h2 { font-size: clamp(1.9rem, 3vw, 2.7rem); }
+    h3 { font-size: 1.35rem; }
+    a { color: inherit; }
+
+    .container {
+      width: min(1120px, 90%);
+      margin: auto;
+    }
+
+    .eyebrow {
+      font-size: .73rem;
+      text-transform: uppercase;
+      letter-spacing: .19em;
+      font-weight: 700;
+      color: var(--orange);
+    }
+
+    /* Navigation */
+    .nav {
+      background: var(--paper);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .nav-inner {
+      min-height: 76px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      font-family: Georgia, serif;
+      font-size: 1.45rem;
+      font-weight: bold;
+      color: var(--forest);
+      text-decoration: none;
+    }
+
+    .brand span { color: var(--orange); }
+
+    .nav-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+    }
+
+    .nav-links a {
+      font-size: .9rem;
+      text-decoration: none;
+      color: var(--ink);
+    }
+
+    .nav-links a:hover { color: var(--orange); }
+
+    /* Hero */
+    .hero {
+      color: white;
+      background: var(--forest-dark);
+      padding: 100px 0 85px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "HEN";
+      position: absolute;
+      right: -25px;
+      bottom: -100px;
+      font: bold 330px Georgia, serif;
+      color: rgba(255,255,255,.035);
+      pointer-events: none;
+    }
+
+    .hero-content {
+      position: relative;
+      z-index: 1;
+      max-width: 800px;
+    }
+
+    .hero h1 {
+      margin: 18px 0 22px;
+      max-width: 780px;
+    }
+
+    .hero p {
+      max-width: 680px;
+      color: #d4e4dd;
+      font-size: 1.08rem;
+    }
+
+    .buttons {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 30px;
+    }
+
+    .button {
+      display: inline-block;
+      padding: 12px 22px;
+      text-decoration: none;
+      border-radius: 5px;
+      font-weight: 600;
+      font-size: .9rem;
+      border: 1px solid #a5c4b7;
+    }
+
+    .button.primary {
+      background: var(--orange);
+      border-color: var(--orange);
+      color: #18221c;
+    }
+
+    .button.secondary { color: white; }
+
+    /* Layout */
+    section { padding: 76px 0; }
+
+    .intro {
+      max-width: 760px;
+      color: var(--muted);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 20px;
+      margin-top: 32px;
+    }
+
+    .card {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 26px;
+    }
+
+    .card h3 { margin: 12px 0; }
+
+    .card p {
+      color: var(--muted);
+      font-size: .93rem;
+    }
+
+    .number {
+      font-family: Georgia, serif;
+      color: var(--orange);
+      font-size: 2rem;
+    }
+
+    .alternate {
+      background: #eaece5;
+    }
+
+    /* Data highlights */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: #d3d9cf;
+      border: 1px solid #d3d9cf;
+      margin-top: 34px;
+    }
+
+    .stat {
+      background: var(--paper);
+      padding: 28px;
+    }
+
+    .stat strong {
+      display: block;
+      color: var(--forest);
+      font: bold 2.2rem Georgia, serif;
+    }
+
+    .stat span {
+      font-size: .86rem;
+      color: var(--muted);
+    }
+
+    /* Team */
+    .team {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22px;
+      margin-top: 32px;
+    }
+
+    .person {
+      padding: 30px;
+      background: var(--paper);
+      border-left: 4px solid var(--orange);
+    }
+
+    .person small {
+      text-transform: uppercase;
+      letter-spacing: .14em;
+      color: var(--forest);
+      font-weight: bold;
+    }
+
+    /* Model results */
+    .results {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 28px;
+    }
+
+    .result {
+      padding: 24px;
+      border-radius: 8px;
+      background: var(--forest);
+      color: white;
+    }
+
+    .result strong {
+      display: block;
+      font: bold 2.2rem Georgia, serif;
+      color: #f0bd8f;
+    }
+
+    .result span {
+      display: block;
+      font-size: .84rem;
+      margin-top: 12px;
+    }
+
+    /* Images */
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+      margin-top: 28px;
+    }
+
+    figure {
+      margin: 0;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      padding: 14px;
+      border-radius: 9px;
+    }
+
+    figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 5px;
+    }
+
+    figcaption {
+      padding: 13px 5px 3px;
+      font-size: .87rem;
+      color: var(--muted);
+    }
+
+    /* Evidence */
+    .evidence a {
+      display: block;
+      padding: 18px 0;
+      border-bottom: 1px solid var(--line);
+      color: var(--forest);
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    .evidence a:hover { color: var(--orange); }
+
+    .note {
+      padding: 20px;
+      border-left: 4px solid var(--orange);
+      background: #f3e8da;
+      color: #604c39;
+      margin-top: 28px;
+    }
+
+    footer {
+      padding: 36px 0;
+      background: var(--forest-dark);
+      color: #d4e4dd;
+      text-align: center;
+      font-size: .85rem;
+    }
+
+    @media (max-width: 800px) {
+      .grid, .results { grid-template-columns: repeat(2, 1fr); }
+      .team, .gallery { grid-template-columns: 1fr; }
+      .hero { padding: 70px 0; }
+    }
+
+    @media (max-width: 480px) {
+      .grid, .results, .stats { grid-template-columns: 1fr; }
+      .nav-inner { padding: 14px 0; }
+      .hero::after { display: none; }
+    }
+  </style>
+</head>
+
+<body>
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a class="brand" href="#">Henderson<span>.</span>Air</a>
+      <div class="nav-links">
+        <a href="#about">Overview</a>
+        <a href="#team">Our Team</a>
+        <a href="#process">Development</a>
+        <a href="#results">Results</a>
+        <a href="#evidence">Evidence</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="container hero-content">
+      <div class="eyebrow">BBIM713 · Joint Capstone Portfolio · 2026</div>
+      <h1>Understanding the air we breathe in Henderson.</h1>
+      <p>
+        Exploring historical PM10 and NO₂ pollution through
+        environmental data analysis, machine learning and
+        cloud-connected visualisation.
+      </p>
+      <div class="buttons">
+        <a class="button primary"
+           href="#results">Explore Our Findings</a>
+        <a class="button secondary"
+           href="https://github.com/Sujan-bishowkarma/Henderson-air-quality"
+           target="_blank" rel="noopener">View Project Code</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="about">
+      <div class="container">
+        <div class="eyebrow">01 / The Research</div>
+        <h2>Why Henderson air quality?</h2>
+        <p class="intro">
+          Our capstone investigates historical pollutant
+          concentrations measured at Auckland's Henderson
+          monitoring station. We examined seasonal patterns,
+          meteorological relationships and short-term
+          forecasting performance, then presented the findings
+          in a cloud-connected dashboard.
+        </p>
+        <div class="stats">
+          <div class="stat">
+            <strong>150,432</strong>
+            <span>Hourly observations</span>
+          </div>
+          <div class="stat">
+            <strong>2006–23</strong>
+            <span>Historical monitoring period</span>
+          </div>
+          <div class="stat">
+            <strong>6</strong>
+            <span>Forecasting methods evaluated</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="alternate" id="team">
+      <div class="container">
+        <div class="eyebrow">02 / Collaboration</div>
+        <h2>The people behind the project</h2>
+        <p class="intro">
+          This research was completed collaboratively as part
+          of the NZSE BBIM713 Capstone Project.
+        </p>
+
+        <div class="team">
+          <div class="person">
+            <small>Team Leader</small>
+            <h3>Asmita Khatri</h3>
+            <p>
+              Project coordination, Decision Tree,
+              LightGBM and Prophet modelling,
+              evaluation and reporting.
+            </p>
+          </div>
+
+          <div class="person">
+            <small>Team Member</small>
+            <h3>Sujan Bishowkarma</h3>
+            <p>
+              Linear Regression, Random Forest,
+              XGBoost modelling, evaluation
+              and technical implementation.
+            </p>
+          </div>
+        </div>
+
+        <p class="intro">
+          Both members collaborated on preprocessing,
+          exploratory analysis, cloud integration,
+          dashboard development and testing.
+        </p>
+      </div>
+    </section>
+
+    <section id="process">
+      <div class="container">
+        <div class="eyebrow">03 / Technical Journey</div>
+        <h2>From raw data to usable insights</h2>
+
+        <div class="grid">
+          <div class="card">
+            <div class="number">01</div>
+            <h3>Data Preparation</h3>
+            <p>
+              Examining missing measurements,
+              duplicates, unusual values and
+              hourly data consistency.
+            </p>
+          </div>
+
+          <div class="card">
+            <div class="number">02</div>
+            <h3>Pattern Discovery</h3>
+            <p>
+              Exploring PM10, NO₂, seasons,
+              wind speed and hourly trends.
+            </p>
+          </div>
+
+          <div class="card">
+            <div class="number">03</div>
+            <h3>Model Development</h3>
+            <p>
+              Comparing Linear Regression,
+              Decision Tree, Random Forest,
+              XGBoost, LightGBM and Prophet.
+            </p>
+          </div>
+
+          <div class="card">
+            <div class="number">04</div>
+            <h3>Model Validation</h3>
+            <p>
+              Chronological splitting, validation,
+              held-out testing and persistence
+              benchmark comparisons.
+            </p>
+          </div>
+
+          <div class="card">
+            <div class="number">05</div>
+            <h3>Cloud Database</h3>
+            <p>
+              Publishing historical records and
+              predictions using Supabase
+              PostgreSQL and REST APIs.
+            </p>
+          </div>
+
+          <div class="card">
+            <div class="number">06</div>
+            <h3>Visualisation</h3>
+            <p>
+              Creating an interactive Streamlit
+              dashboard for exploration and
+              retrospective forecasting.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="alternate" id="results">
+      <div class="container">
+        <div class="eyebrow">04 / Research Outcomes</div>
+        <h2>What did our models discover?</h2>
+        <p class="intro">
+          LightGBM achieved the strongest validation
+          performance for the selected forecasting targets.
+          The following figures show final held-out test R².
+        </p>
+
+        <div class="results">
+          <div class="result">
+            <strong>0.762</strong>
+            <span>Next-hour NO₂</span>
+          </div>
+          <div class="result">
+            <strong>0.333</strong>
+            <span>Next-hour PM10</span>
+          </div>
+          <div class="result">
+            <strong>0.441</strong>
+            <span>Next 3-hour average PM10</span>
+          </div>
+          <div class="result">
+            <strong>0.387</strong>
+            <span>Next 24-hour average PM10</span>
+          </div>
+        </div>
+
+        <p>
+          NO₂ was more predictable than PM10.
+          Abrupt PM10 changes remained challenging,
+          making careful interpretation important.
+        </p>
+      </div>
+    </section>
+
+    <section id="visuals">
+      <div class="container">
+        <div class="eyebrow">05 / Visual Evidence</div>
+        <h2>Data tells the story</h2>
+        <p class="intro">
+          Selected outputs from our exploratory
+          analysis and forecasting experiments.
+        </p>
+
+        <div class="gallery">
+          <figure>
+            <img loading="lazy"
+              src="https://raw.githubusercontent.com/Sujan-bishowkarma/Henderson-air-quality/main/screenshots/pm10_no2_trends.png"
+              alt="PM10 and NO2 historical trends">
+            <figcaption>Historical PM10 and NO₂ trends</figcaption>
+          </figure>
+
+          <figure>
+            <img loading="lazy"
+              src="https://raw.githubusercontent.com/Sujan-bishowkarma/Henderson-air-quality/main/screenshots/seasonal_analysis.png"
+              alt="Seasonal pollution analysis">
+            <figcaption>Seasonal pollutant comparison</figcaption>
+          </figure>
+
+          <figure>
+            <img loading="lazy"
+              src="https://raw.githubusercontent.com/Sujan-bishowkarma/Henderson-air-quality/main/screenshots/lightgbm_results.png"
+              alt="LightGBM evaluation results">
+            <figcaption>Forecast evaluation metrics</figcaption>
+          </figure>
+
+          <figure>
+            <img loading="lazy"
+              src="https://raw.githubusercontent.com/Sujan-bishowkarma/Henderson-air-quality/main/screenshots/actual_vs_predicted_no2.png"
+              alt="Actual and predicted NO2">
+            <figcaption>Actual versus predicted NO₂</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="alternate" id="evidence">
+      <div class="container">
+        <div class="eyebrow">06 / Supporting Materials</div>
+        <h2>Explore the project evidence</h2>
+        <p class="intro">
+          Our repository documents the analytical
+          methods, implementation work and results
+          supporting this research portfolio.
+        </p>
+
+        <div class="evidence">
+          <a href="https://github.com/Sujan-bishowkarma/Henderson-air-quality"
+             target="_blank" rel="noopener">
+            GitHub Repository — Code and Notebooks ↗
+          </a>
+
+          <a href="https://github.com/Sujan-bishowkarma/Henderson-air-quality/tree/main/screenshots"
+             target="_blank" rel="noopener">
+            Screenshots — Analysis and Testing Evidence ↗
+          </a>
+
+          <a href="https://github.com/Sujan-bishowkarma/Henderson-air-quality/blob/main/README.md"
+             target="_blank" rel="noopener">
+            README — Project Documentation ↗
+          </a>
+        </div>
+
+        <div class="note">
+          <strong>Research limitation:</strong>
+          This is a historical, single-station research
+          prototype. Forecasts are not official Auckland
+          Council predictions or public-health alerts.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      Henderson Air Quality Research Portfolio
+      <p>Asmita Khatri & Sujan Bishowkarma · NZSE · 2026</p>
+    </div>
+  </footer>
+</body>
+</html>
