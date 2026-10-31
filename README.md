@@ -30,6 +30,12 @@ Python, Pandas, Scikit-learn, XGBoost, LightGBM, Prophet, Supabase PostgreSQL an
 ## Joint Project Portfolio
 [View Our GitHub Pages Portfolio](https://sujan-bishowkarma.github.io/Henderson-air-quality/)
 
+## Live Streamlit Dashboard
+
+Explore historical PM10 and NO₂ trends, machine learning results, and interactive forecasting.
+
+[Open Live Streamlit Dashboard](https://henderson-air-quality.streamlit.app/)
+
 ## Project Evidence
 See the `Screenshots/` folder for exploratory analysis, model evaluation, API testing and dashboard screenshots.
 
