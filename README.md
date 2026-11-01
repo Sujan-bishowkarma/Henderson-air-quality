@@ -1,4 +1,4 @@
-# Henderson Air Quality Monitoring and Prediction System
+.# Henderson Air Quality Monitoring and Prediction System
 
 ## Project Overview
 This joint BBIM713 Capstone Project examines historical PM10 and NO₂ concentrations at Henderson, Auckland, using machine learning, Supabase PostgreSQL, REST API integration and Streamlit.
