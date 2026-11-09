@@ -566,8 +566,9 @@ else:
 # latest available air-quality timestamp. This is NOT a real-time 2026 forecast.
 
 st.divider()
-st.header("Future Air Quality Forecast")
+st.header("Future Air Quality Forecast — Three Targets")
 st.caption(
+    "NO₂ next hour, PM10 next hour and PM10 next-24-hour average. "
     "Forecasts beyond the latest stored observation, using saved LightGBM models. "
     "If the database ends in February 2023, these are forecasts from that historical "
     "endpoint—not today's Auckland air quality."
@@ -607,15 +608,15 @@ def future_history_chart(history, origin, target, prediction, hours):
     point_time = first if hours == 1 else end
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=[point_time], y=[prediction], mode="markers",
-        name="Predicted", marker=dict(color="#FF9900", size=15, symbol="star"),
-        hovertemplate=("Predicted: %{y:.2f} µg/m³<extra></extra>"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=past.index, y=past.values, mode="lines+markers", name="Actual (historical)",
+        x=past.index, y=past.values, mode="lines+markers", name="Observed history",
         line=dict(color="#0866D8", width=2),
         marker=dict(color="#0866D8", size=5),
         hovertemplate="%{x|%d %b %Y %H:%M}<br>Observed: %{y:.2f} µg/m³<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=[point_time], y=[prediction], mode="markers",
+        name="Future forecast", marker=dict(color="#FF9900", size=16, symbol="star"),
+        hovertemplate="Predicted: %{y:.2f} µg/m³<extra></extra>",
     ))
     if hours == 24:
         fig.add_vrect(
@@ -753,12 +754,12 @@ try:
                             + ". This is a carry-forward assumption, NOT measured weather "
                             "at the forecast origin. Forecast uncertainty may increase."
                         )
-                    tab_hour, tab_day = st.tabs(["Next 1 Hour", "Next 24 Hours"])
+                    tab_hour, tab_day = st.tabs(["Next 1 Hour — NO₂ and PM10", "Next 24 Hours — PM10 Average"])
 
                     with tab_hour:
                         st.markdown("**One-hour-ahead pollutant concentration**")
                         c_pm10, c_no2 = st.columns(2)
-                        for holder, target in [(c_pm10, "PM10"), (c_no2, "NO2")]:
+                        for holder, target in [(c_no2, "NO2"), (c_pm10, "PM10")]:
                             with holder:
                                 st.markdown(f"#### {target}")
                                 try:
@@ -777,9 +778,8 @@ try:
                     with tab_day:
                         st.markdown("**PM10 average concentration over the next 24 hours**")
                         st.caption(
-                            "A 24-hour mean is different from a 24-hour sequence of "
-                            "individual hourly forecasts. No saved 24-hour NO₂ model "
-                            "has been confirmed in this project."
+                            "One predicted PM10 mean for the next 24-hour interval—not "
+                            "24 individual hourly readings. The existing 24-hour PM10 model is used."
                         )
                         try:
                             path = MODEL_DIR / "pm10_24h_model.pkl"
@@ -800,8 +800,9 @@ try:
                             st.warning(f"Cannot calculate 24-hour PM10 forecast: {exc}")
 
                     st.caption(
-                        "Both tabs use weather measured at the forecast origin, not a "
-                        "future weather forecast. Forecast values are not verified here "
+                        "Weather values are taken from observations at the origin, or from a "
+                        "clearly disclosed recent-observation carry-forward assumption. "
+                        "No future observed values are used. Forecast values are not verified here "
                         "against the final training notebook. The results are an academic "
                         "end-of-data demonstration, not official public-health warnings."
                     )
