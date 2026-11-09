@@ -374,38 +374,42 @@ def next_forward_features(history, target, origin):
 
 
 def forward_graph(history, origin, target, value, hours):
-    """Blue historical line + orange star, following the supplied screenshot."""
+    """Connect last observed value to the next-hour forecast without inventing future actuals."""
     past = history[target.lower()].loc[:origin].tail(25).dropna()
-    start = pd.Timestamp(origin) + pd.Timedelta(hours=1)
-    end = pd.Timestamp(origin) + pd.Timedelta(hours=hours)
-    dot_at = start if hours == 1 else end
+    if past.empty:
+        raise ValueError("No historical observations available for this chart")
+    origin_time = pd.Timestamp(origin)
+    forecast_time = origin_time + pd.Timedelta(hours=hours)
+    last_observed = float(past.iloc[-1])
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=past.index, y=past.values, name="Actual (historical)",
         mode="lines+markers", line=dict(color="#1268D3", width=2.3),
         marker=dict(size=5, color="#1268D3"),
-        hovertemplate="%{x|%d %b %Y %H:%M}<br>Actual: %{y:.2f} µg/m³<extra></extra>"
+        hovertemplate="%{x|%d %b %Y %H:%M}<br>Observed: %{y:.2f} µg/m³<extra></extra>"
     ))
     fig.add_trace(go.Scatter(
-        x=[dot_at], y=[value], name="Forecast",
-        mode="markers", marker=dict(symbol="star", size=16, color="#F39A1F"),
-        hovertemplate="%{x|%d %b %Y %H:%M}<br>Forecast: %{y:.2f} µg/m³<extra></extra>"
+        # The first point is only a visual anchor: it is the LAST REAL READING.
+        x=[origin_time, forecast_time], y=[last_observed, float(value)],
+        name="Forecast (connected)", mode="lines+markers",
+        line=dict(color="#F39A1F", width=2.8, dash="dash"),
+        marker=dict(color="#F39A1F", size=[1, 15], symbol=["circle", "star"]),
+        customdata=["Last observed (not a forecast)", "Forecast"],
+        hovertemplate="%{x|%d %b %Y %H:%M}<br>%{customdata}: %{y:.2f} µg/m³<extra></extra>"
     ))
-    if hours == 24:
-        fig.add_vrect(x0=start, x1=end, fillcolor="#F6A940", opacity=0.13,
-                      line_width=0,
-                      annotation_text="Future 24-hour mean", annotation_position="top left")
     fig.add_shape(type="line", xref="x", yref="paper",
-                  x0=pd.Timestamp(origin).isoformat(),
-                  x1=pd.Timestamp(origin).isoformat(),
-                  y0=0, y1=1,
+                  x0=origin_time, x1=origin_time, y0=0, y1=1,
                   line=dict(color="#777777", dash="dash", width=1.5))
+    fig.add_annotation(x=origin_time, y=1, xref="x", yref="paper",
+                       text="Last observed hour", showarrow=False,
+                       xanchor="right", yanchor="bottom",
+                       font=dict(size=11, color="#666666"))
     fig.update_layout(
-        height=340, margin=dict(l=32, r=24, t=35, b=35),
-        xaxis_title="", yaxis_title=f"{target} (µg/m³)",
-        legend=dict(orientation="h", y=1.14, x=0), hovermode="closest"
+        height=370, margin=dict(l=32, r=24, t=55, b=35),
+        xaxis_title="Date and time", yaxis_title=f"{target} (µg/m³)",
+        legend=dict(orientation="h", y=1.16, x=0), hovermode="closest"
     )
-    fig.update_yaxes(zeroline=False)
+    fig.update_yaxes(rangemode="tozero")
     return fig
 
 
@@ -496,7 +500,11 @@ def hourly_24_forecasts(history, origin, target):
 
 
 def hourly_24_plot(history, origin, target, predictions):
+    """Blue observed history joined visually to 24 orange hourly predictions."""
     past = history[target.lower()].loc[:origin].tail(25).dropna()
+    if past.empty:
+        raise ValueError("No historical measurements available for plotting")
+    boundary = pd.Timestamp(origin)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=past.index, y=past.values,
@@ -505,16 +513,19 @@ def hourly_24_plot(history, origin, target, predictions):
         marker=dict(size=5, color="#1268D3"),
         hovertemplate="%{x|%d %b %Y, %H:%M}<br>Observed: %{y:.2f} µg/m³<extra></extra>"
     ))
+    # The orange line is anchored at the final BLUE actual reading for visual
+    # continuity. That boundary value is NEVER labelled as a future forecast.
+    future_x = [boundary] + list(predictions.index)
+    future_y = [float(past.iloc[-1])] + [float(v) for v in predictions.values]
     fig.add_trace(go.Scatter(
-        x=predictions.index, y=predictions.values,
+        x=future_x, y=future_y,
         name="Forecast (24 hourly values)", mode="lines+markers",
-        line=dict(color="#F39A1F", width=2.8),
-        marker=dict(size=7, color="#F39A1F", symbol="diamond"),
-        hovertemplate="%{x|%d %b %Y, %H:%M}<br>Forecast: %{y:.2f} µg/m³<extra></extra>"
+        line=dict(color="#F39A1F", width=2.8, dash="dash"),
+        marker=dict(size=[1] + [7]*len(predictions),
+                    color="#F39A1F", symbol=["circle"] + ["diamond"]*len(predictions)),
+        customdata=["Last observed (not forecast)"] + ["Forecast"]*len(predictions),
+        hovertemplate="%{x|%d %b %Y, %H:%M}<br>%{customdata}: %{y:.2f} µg/m³<extra></extra>"
     ))
-    # Mark the *last measured hour* rather than a future time on the x-axis.
-    # These plots deliberately contain no future actual/blue data points.
-    boundary = pd.Timestamp(origin).to_pydatetime()
     fig.add_shape(type="line", xref="x", yref="paper",
                   x0=boundary, x1=boundary, y0=0, y1=1,
                   line=dict(color="#777777", dash="dash", width=1.5))
@@ -583,19 +594,17 @@ try:
                 # Respect the existing pollutant filter in the sidebar.
                 # No extra selection is needed in the forecast section.
                 st.caption(f"Showing forecasts for: {pollutant}")
-                one_hour, hourly_day, mean_day = st.tabs(
-                    ["Next 1 Hour", "Next 24 Hours (hourly)", "24-hour Average (existing)"]
+                one_hour, hourly_day = st.tabs(
+                    ["Next 1 Hour", "Next 24 Hours (hourly)"]
                 )
                 with one_hour:
                     forward_card(window, end_time, pollutant, 1)
                 with hourly_day:
                     hourly_24_card(window, end_time, pollutant)
-                with mean_day:
-                    forward_card(window, end_time, pollutant, 24)
                 st.info("Demonstration only. These are forecasts beyond the stored dataset "
                         "endpoint, not live forecasts or official health warnings. "
-                        "The next-24-hour average is ONE mean value; the hourly tab requires "
-                        "24 separately predicted future values.")
+                        "The 24-hour tab requires "
+                        "24 separately predicted future hourly values.")
 except Exception as exc:
     st.warning("Cannot load forward forecast inputs from Supabase.")
     st.caption(f"Details: {type(exc).__name__}: {exc}")
