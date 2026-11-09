@@ -329,8 +329,19 @@ def load_avg_model(hours):
     path = MODEL_DIR / f"pm10_{hours}h_model.pkl"
     return joblib.load(path) if path.exists() else None
 
-def feature_names(model):
-    """Read persisted feature order across sklearn/LightGBM versions."""
+def notebook_hourly_features(target):
+    """Exact feature order from the uploaded original modelling notebook, make_features()."""
+    return (["hour", "month", "dayofweek", "is_weekend", "Temp", "RH", "WS"]
+            + [f"{target}_lag{lag}" for lag in (0, 1, 2, 3, 24)]
+            + [f"{target}_roll3", f"{target}_roll24"])
+
+
+def feature_names(model, target=None):
+    """Prefer model metadata; recover ONLY verified notebook hourly feature order.
+
+    Some saved LightGBM sklearn models do not expose feature_names_in_ after
+    environment version changes. Never invent an ordering for unknown models.
+    """
     for attr in ("feature_names_in_", "feature_name_"):
         try:
             names = getattr(model, attr, None)
@@ -338,10 +349,24 @@ def feature_names(model):
                 return list(names)
         except (AttributeError, TypeError, ValueError):
             pass
-    booster = getattr(model, "booster_", None)
-    if booster is not None and hasattr(booster, "feature_name"):
-        return list(booster.feature_name())
-    raise ValueError("Saved model does not expose the training feature names. Re-export it from the notebook.")
+    try:
+        booster = getattr(model, "booster_", None)
+        if booster is not None and hasattr(booster, "feature_name"):
+            names = list(booster.feature_name())
+            if names and not all(str(x).startswith("Column_") for x in names):
+                return names
+    except (AttributeError, TypeError, ValueError):
+        pass
+    if target in ("NO2", "PM10"):
+        candidates = notebook_hourly_features(target)
+        n = getattr(model, "n_features_in_", None)
+        if n is not None and int(n) != len(candidates):
+            raise ValueError(
+                f"The saved model expects {n} features, but the original notebook uses "
+                f"{len(candidates)}. Please re-export the model with its feature list."
+            )
+        return candidates
+    raise ValueError("Unknown model feature order. Re-export model with its training feature list.")
 
 
 def predict_saved_model(model, X):
@@ -459,7 +484,7 @@ def next_hour_block(box):
             return
         try:
             model = load_model(pollutant)
-            required = feature_names(model)
+            required = feature_names(model, pollutant)
             missing = [c for c in required if c not in X.columns]
             if missing:
                 st.error("Missing model features: " + ", ".join(missing))
@@ -655,15 +680,52 @@ try:
             if origin != forecast_origin:
                 st.warning("Latest observation could not be recovered from the historical window.")
             else:
-                weather_at_origin = lookback.loc[last_stored]
-                if isinstance(weather_at_origin, pd.DataFrame):
-                    weather_at_origin = weather_at_origin.iloc[-1]
+                # Take weather at the prediction origin when available.
+                # If the final hour contains missing weather, use ONLY previously
+                # observed weather within 24h as a documented last-observation-
+                # carried-forward assumption. Never fill with future readings.
                 required_weather = ("temp", "rh", "ws")
-                if any(v not in weather_at_origin.index or pd.isna(weather_at_origin[v])
-                       for v in required_weather):
-                    st.warning("Latest weather inputs are incomplete; forecasts cannot run safely.")
+                for weather_col in required_weather:
+                    if weather_col not in lookback.columns:
+                        lookback[weather_col] = np.nan
+                current_weather = lookback.loc[last_stored]
+                if isinstance(current_weather, pd.DataFrame):
+                    current_weather = current_weather.iloc[-1]
+                used_fallback = []
+                chosen_weather = []
+                missing_weather = []
+                for weather_col in required_weather:
+                    current_value = current_weather.get(weather_col, np.nan)
+                    if pd.notna(current_value) and np.isfinite(float(current_value)):
+                        chosen_weather.append(float(current_value))
+                        continue
+                    prior = lookback[weather_col].loc[:origin].dropna()
+                    prior = prior.loc[prior.index >= pd.Timestamp(origin) - pd.Timedelta(hours=24)]
+                    if prior.empty:
+                        missing_weather.append(weather_col)
+                    else:
+                        chosen_weather.append(float(prior.iloc[-1]))
+                        used_fallback.append((weather_col, prior.index[-1]))
+                if missing_weather:
+                    st.warning(
+                        "Forecast unavailable: no recent valid measurements for "
+                        + ", ".join(missing_weather)
+                        + ". A verified weather source or retrained weather-free model is needed."
+                    )
                 else:
-                    origin_weather = tuple(float(weather_at_origin[v]) for v in required_weather)
+                    origin_weather = tuple(chosen_weather)
+                    if used_fallback:
+                        details = ", ".join(
+                            f"{v.upper()} from {t:%d %b %Y %H:%M}"
+                            for v, t in used_fallback
+                        )
+                        st.warning(
+                            "Some weather measurements at the final hour are missing. "
+                            "Using the most recent observed values (within 24h): "
+                            + details
+                            + ". This is a carry-forward assumption, NOT measured weather "
+                            "at the forecast origin. Forecast uncertainty may increase."
+                        )
                     tab_hour, tab_day = st.tabs(["Next 1 Hour", "Next 24 Hours"])
 
                     with tab_hour:
@@ -679,7 +741,7 @@ try:
                                     fitted = load_model(target)
                                     values = build_features(lookback, target, origin, *origin_weather)
                                     prediction = safely_predict_forward(
-                                        fitted, feature_names(fitted), values
+                                        fitted, feature_names(fitted, target), values
                                     )
                                     render_forecast_result(lookback, origin, target, prediction, 1)
                                 except (ValueError, KeyError, AttributeError, FileNotFoundError) as exc:
