@@ -561,253 +561,168 @@ elif pollutant == "PM10":
 else:
     next_hour_block(st.container())
 
-# ---------- end-of-dataset future forecasts: next hour / next 24h ----------
-# A forward-only demonstration: all model inputs are sourced at or before the
-# latest available air-quality timestamp. This is NOT a real-time 2026 forecast.
+# ---------- validated, forward-only demonstration ----------
+# These four bundles are trained separately using the accompanying trainer.
+# They use past pollutant measurements + calendar features and DO NOT require
+# missing wind speed or future weather inputs.
 
 st.divider()
-st.header("Future Air Quality Forecast — Three Targets")
+st.header("Future Air Quality Forecast")
 st.caption(
-    "NO₂ next hour, PM10 next hour and PM10 next-24-hour average. "
-    "Forecasts beyond the latest stored observation, using saved LightGBM models. "
-    "If the database ends in February 2023, these are forecasts from that historical "
-    "endpoint—not today's Auckland air quality."
+    "Next-hour PM10 and NO₂ concentrations, plus the next-24-hour averages for both pollutants. "
+    "Forecasts start AFTER the latest Supabase observation, so if the dataset ends "
+    "in February 2023 these are historical-origin forecasts, not current 2026 readings."
 )
 
 @st.cache_data(ttl=3600)
-def get_latest_observation_time():
-    result = (get_client().table("air_quality")
-              .select("datetime")
-              .order("datetime", desc=True)
-              .limit(1).execute())
-    records = result.data or []
-    return pd.Timestamp(records[0]["datetime"]) if records else None
+def latest_forward_origin():
+    response = (get_client().table("air_quality").select("datetime")
+                .order("datetime", desc=True).limit(1).execute())
+    rows = response.data or []
+    return pd.Timestamp(rows[0]["datetime"]) if rows else None
 
 
-def safely_predict_forward(model, required_features, values):
-    """Ensure inference uses complete historical features in training order."""
-    missing = [f for f in required_features if f not in values.columns]
-    if missing:
-        raise ValueError("Model input columns missing: " + ", ".join(missing))
-    X = values.loc[:, required_features]
-    if not np.isfinite(X.to_numpy(dtype=float)).all():
-        raise ValueError("Historical inputs contain missing/non-finite features.")
-    return max(0.0, predict_saved_model(model, X))
+def next_forward_features(history, target, origin):
+    """Rebuild the exact feature names/order used in the in-notebook 4-model training cell.
 
-
-def future_history_chart(history, origin, target, prediction, hours):
-    """Screenshot-style graph: blue history and orange forecast star.
-
-    For 24h, the star represents ONE mean across the shaded 24h period,
-    not a sequence of hourly values. No unavailable future actual is plotted.
+    The notebook defines rolling summaries at the forecast origin with full
+    3/24-hour windows. Only observations up to origin are accessed.
     """
+    other = "NO2" if target == "PM10" else "PM10"
+    now = pd.Timestamp(origin)
+    s = pd.to_numeric(history[target.lower()], errors="coerce")
+    other_s = pd.to_numeric(history[other.lower()], errors="coerce")
+    h3 = s.loc[now-pd.Timedelta(hours=2):now]
+    h24 = s.loc[now-pd.Timedelta(hours=23):now]
+    row = {
+        "hour": now.hour,
+        "dayofweek": now.dayofweek,
+        "month": now.month,
+        "dayofyear": now.dayofyear,
+    }
+    for lag in (0, 1, 2, 3, 24):
+        row[f"{target}_lag{lag}"] = s.get(now-pd.Timedelta(hours=lag), np.nan)
+    row[f"{target}_roll3"] = h3.mean() if h3.notna().sum() == 3 else np.nan
+    row[f"{target}_roll24"] = h24.mean() if h24.notna().sum() == 24 else np.nan
+    row[f"{target}_std24"] = h24.std() if h24.notna().sum() == 24 else np.nan
+    row[f"{other}_lag0"] = other_s.get(now, np.nan)
+    row[f"{other}_lag1"] = other_s.get(now-pd.Timedelta(hours=1), np.nan)
+    return pd.DataFrame([row], index=[now]).astype(float)
+
+
+def forward_graph(history, origin, target, value, hours):
+    """Blue historical line + orange star, following the supplied screenshot."""
     past = history[target.lower()].loc[:origin].tail(25).dropna()
-    first = origin + timedelta(hours=1)
-    end = origin + timedelta(hours=hours)
-    # Represent the 24h average at its period-end timestamp, not every hour.
-    point_time = first if hours == 1 else end
+    start = pd.Timestamp(origin) + pd.Timedelta(hours=1)
+    end = pd.Timestamp(origin) + pd.Timedelta(hours=hours)
+    dot_at = start if hours == 1 else end
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=past.index, y=past.values, mode="lines+markers", name="Observed history",
-        line=dict(color="#0866D8", width=2),
-        marker=dict(color="#0866D8", size=5),
-        hovertemplate="%{x|%d %b %Y %H:%M}<br>Observed: %{y:.2f} µg/m³<extra></extra>",
+        x=past.index, y=past.values, name="Actual (historical)",
+        mode="lines+markers", line=dict(color="#1268D3", width=2.3),
+        marker=dict(size=5, color="#1268D3"),
+        hovertemplate="%{x|%d %b %Y %H:%M}<br>Actual: %{y:.2f} µg/m³<extra></extra>"
     ))
     fig.add_trace(go.Scatter(
-        x=[point_time], y=[prediction], mode="markers",
-        name="Future forecast", marker=dict(color="#FF9900", size=16, symbol="star"),
-        hovertemplate="Predicted: %{y:.2f} µg/m³<extra></extra>",
+        x=[dot_at], y=[value], name="Forecast",
+        mode="markers", marker=dict(symbol="star", size=16, color="#F39A1F"),
+        hovertemplate="%{x|%d %b %Y %H:%M}<br>Forecast: %{y:.2f} µg/m³<extra></extra>"
     ))
     if hours == 24:
-        fig.add_vrect(
-            x0=first, x1=end, fillcolor="#FFB347", opacity=0.14,
-            line_width=0,
-            annotation_text="Next 24h: mean over shaded period",
-            annotation_position="top left",
-        )
-    fig.add_vline(x=origin.timestamp() * 1000, line_color="#777777", line_dash="dot")
+        fig.add_vrect(x0=start, x1=end, fillcolor="#F6A940", opacity=0.13,
+                      line_width=0,
+                      annotation_text="Future 24-hour mean", annotation_position="top left")
+    fig.add_vline(x=pd.Timestamp(origin).timestamp()*1000, line_dash="dash",
+                  line_color="#777777")
     fig.update_layout(
-        title=None,
-        xaxis_title=None,
-        yaxis_title=f"{target} (µg/m³)",
-        height=350,
-        hovermode="closest",
-        legend=dict(orientation="h", y=1.15, x=0),
-        margin=dict(t=35, b=45, l=50, r=30),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
+        height=340, margin=dict(l=32, r=24, t=35, b=35),
+        xaxis_title="", yaxis_title=f"{target} (µg/m³)",
+        legend=dict(orientation="h", y=1.14, x=0), hovermode="closest"
     )
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(showgrid=True, gridcolor="#E8EEF4", zeroline=False)
+    fig.update_yaxes(zeroline=False)
     return fig
 
 
-def render_forecast_result(history, origin, target, prediction, hours):
-    """Screenshot-style summary (date, predicted value, delta, and graph)."""
-    start_future = origin + timedelta(hours=1)
-    end_future = origin + timedelta(hours=hours)
-    if hours == 1:
-        st.markdown(f"**Next hour: {start_future:%d %b %Y %H:%M}**")
-    else:
-        st.markdown(
-            f"**Next 24-hour average: {start_future:%d %b %Y %H:%M} "
-            f"to {end_future:%d %b %Y %H:%M}**"
-        )
-    current_value = history[target.lower()].loc[:origin].dropna()
-    latest = float(current_value.iloc[-1]) if not current_value.empty else None
-    delta = (f"{prediction - latest:+.1f} vs last observed hour"
-             if latest is not None else None)
-    st.metric("Predicted" if hours == 1 else "Predicted 24h average",
-              f"{prediction:.2f} µg/m³", delta=delta,
-              delta_color="off" if hours == 24 else "normal")
-    if latest is not None:
-        st.caption(f"Last observed {target}: {latest:.2f} µg/m³ · "
-                   "No future actual measurement is available for comparison.")
-    else:
-        st.caption("No future actual measurement is available for comparison.")
-    st.plotly_chart(
-        future_history_chart(history, origin, target, prediction, hours),
-        width="stretch",
-    )
-    if hours == 24:
-        st.caption(
-            "The orange star is the predicted **average** across the shaded "
-            "24-hour interval; it is not an individual hourly prediction."
-        )
-    st.caption("Blue line = previously observed readings · Orange star = future forecast · "
-               "Dotted line = forecast origin")
+def forward_card(history, origin, target, hours):
+    label = "Next-hour concentration" if hours == 1 else "Next-24-hour average"
+    st.markdown(f"#### {target} — {label}")
+    path = MODEL_DIR / f"forward_{target}_{hours}h.pkl"
+    if not path.is_file():
+        st.warning(f"No validated forward model: {path.name}")
+        st.caption("Run the supplied training script first and deploy its model file.")
+        return
+    try:
+        bundle = joblib.load(path)
+        if not isinstance(bundle, dict) or not all(k in bundle for k in
+                ("model", "features", "target", "horizon_hours")):
+            raise ValueError("Saved file must contain model, features, target and horizon_hours.")
+        if bundle["target"] != target or int(bundle["horizon_hours"]) != hours:
+            raise ValueError("Bundle target or horizon does not match.")
+        row = next_forward_features(history, target, origin)
+        cols = list(bundle["features"])
+        missing = [c for c in cols if c not in row.columns]
+        if missing:
+            raise ValueError("Missing features: " + ", ".join(missing))
+        if row[cols].isna().any(axis=None):
+            raise ValueError("Required recent pollutant readings are missing. Choose a valid forecast origin or provide verified observations.")
+        if not hasattr(bundle["model"], "predict"):
+            raise ValueError("Saved model does not have a predict method.")
+        # Use the same features and column order as the notebook's saved model.
+        prediction = float(np.asarray(bundle["model"].predict(row[cols])).ravel()[0])
+        if not np.isfinite(prediction):
+            raise ValueError("Model returned a non-finite prediction.")
+        prediction = max(0., prediction)
+        first = pd.Timestamp(origin) + pd.Timedelta(hours=1)
+        last = pd.Timestamp(origin) + pd.Timedelta(hours=hours)
+        period = (f"{first:%d %b %Y %H:%M}" if hours == 1 else
+                  f"{first:%d %b %Y %H:%M} – {last:%d %b %Y %H:%M}")
+        st.caption("Predicted period: " + period)
+        st.metric("Forecast" if hours == 1 else "Forecast 24h mean",
+                  f"{prediction:.2f} µg/m³")
+        st.plotly_chart(forward_graph(history, origin, target, prediction, hours),
+                        width="stretch")
+        if hours == 24:
+            st.caption("Orange star = ONE predicted average over 24 hours, "
+                       "not 24 individual hourly concentrations.")
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
+        st.error(f"{target} {hours}h forecast unavailable: {exc}")
 
 try:
-    last_stored = get_latest_observation_time()
-    if last_stored is None:
-        st.warning("No observations were found in the database.")
+    end_time = latest_forward_origin()
+    if end_time is None:
+        st.warning("No observations available in Supabase.")
     else:
-        forecast_origin = last_stored.to_pydatetime()
-        # Only query records through the origin (exclusive upper bound).
-        lookback = load_table(
-            "air_quality",
-            forecast_origin - timedelta(hours=48),
-            forecast_origin + timedelta(microseconds=1),
-        )
-        if lookback.empty:
-            st.warning("Not enough historical data to generate a future forecast.")
+        # 48 prior hours and NO future records. Fill only absent timestamps, NOT values.
+        start_time = end_time - pd.Timedelta(hours=48)
+        window = load_table("air_quality", start_time.to_pydatetime(),
+                            (end_time+pd.Timedelta(microseconds=1)).to_pydatetime())
+        if window.empty:
+            st.warning("No historical data near the forecast origin.")
         else:
-            lookback = lookback.set_index("datetime").sort_index()
-            lookback = lookback.loc[lookback.index <= last_stored]
-            origin = lookback.index.max().to_pydatetime()
-            st.write(f"**Forecast starts after:** {origin:%d %B %Y at %H:%M}")
-            if origin != forecast_origin:
-                st.warning("Latest observation could not be recovered from the historical window.")
+            window = (window.set_index("datetime").sort_index()
+                      .loc[lambda x: x.index <= end_time])
+            window = window[~window.index.duplicated(keep="last")]
+            window = window.reindex(pd.date_range(end_time-pd.Timedelta(hours=48),
+                                                  end_time, freq="h"))
+            if len(window) < 25 or not {'pm10','no2'}.issubset(window.columns):
+                st.warning("Not enough pollutant history to make a valid forecast.")
             else:
-                # Take weather at the prediction origin when available.
-                # If the final hour contains missing weather, use ONLY previously
-                # observed weather within 24h as a documented last-observation-
-                # carried-forward assumption. Never fill with future readings.
-                required_weather = ("temp", "rh", "ws")
-                for weather_col in required_weather:
-                    if weather_col not in lookback.columns:
-                        lookback[weather_col] = np.nan
-                current_weather = lookback.loc[last_stored]
-                if isinstance(current_weather, pd.DataFrame):
-                    current_weather = current_weather.iloc[-1]
-                used_fallback = []
-                chosen_weather = []
-                missing_weather = []
-                for weather_col in required_weather:
-                    current_value = current_weather.get(weather_col, np.nan)
-                    if pd.notna(current_value) and np.isfinite(float(current_value)):
-                        chosen_weather.append(float(current_value))
-                        continue
-                    prior = lookback[weather_col].loc[:origin].dropna()
-                    prior = prior.loc[prior.index >= pd.Timestamp(origin) - pd.Timedelta(hours=24)]
-                    if prior.empty:
-                        missing_weather.append(weather_col)
-                    else:
-                        chosen_weather.append(float(prior.iloc[-1]))
-                        used_fallback.append((weather_col, prior.index[-1]))
-                if missing_weather:
-                    st.warning(
-                        "Forecast unavailable: no recent valid measurements for "
-                        + ", ".join(missing_weather)
-                        + ". A verified weather source or retrained weather-free model is needed."
-                    )
-                    with st.expander("Why is the future forecast unavailable? Inspect recent weather readings"):
-                        st.caption("Recent observations only; no missing weather values have been invented.")
-                        recent_weather = lookback[["temp", "rh", "ws"]].tail(48).copy()
-                        st.dataframe(recent_weather, width="stretch")
-                        st.write("Non-missing values in recent 48 hours:")
-                        st.write(recent_weather.notna().sum().to_dict())
-                        st.info("If wind speed is unavailable, check the Supabase import and original workbook. "
-                                "If no valid measurements exist, obtain verified input data or retrain and "
-                                "validate a model without wind speed.")
-                else:
-                    origin_weather = tuple(chosen_weather)
-                    if used_fallback:
-                        details = ", ".join(
-                            f"{v.upper()} from {t:%d %b %Y %H:%M}"
-                            for v, t in used_fallback
-                        )
-                        st.warning(
-                            "Some weather measurements at the final hour are missing. "
-                            "Using the most recent observed values (within 24h): "
-                            + details
-                            + ". This is a carry-forward assumption, NOT measured weather "
-                            "at the forecast origin. Forecast uncertainty may increase."
-                        )
-                    tab_hour, tab_day = st.tabs(["Next 1 Hour — NO₂ and PM10", "Next 24 Hours — PM10 Average"])
-
-                    with tab_hour:
-                        st.markdown("**One-hour-ahead pollutant concentration**")
-                        c_pm10, c_no2 = st.columns(2)
-                        for holder, target in [(c_no2, "NO2"), (c_pm10, "PM10")]:
-                            with holder:
-                                st.markdown(f"#### {target}")
-                                try:
-                                    path = MODEL_DIR / f"best_model_{target}.pkl"
-                                    if not path.is_file():
-                                        raise FileNotFoundError(f"Missing {path.name}")
-                                    fitted = load_model(target)
-                                    values = build_features(lookback, target, origin, *origin_weather)
-                                    prediction = safely_predict_forward(
-                                        fitted, feature_names(fitted, target), values
-                                    )
-                                    render_forecast_result(lookback, origin, target, prediction, 1)
-                                except (ValueError, KeyError, AttributeError, FileNotFoundError) as exc:
-                                    st.warning(f"Cannot calculate {target} forecast: {exc}")
-
-                    with tab_day:
-                        st.markdown("**PM10 average concentration over the next 24 hours**")
-                        st.caption(
-                            "One predicted PM10 mean for the next 24-hour interval—not "
-                            "24 individual hourly readings. The existing 24-hour PM10 model is used."
-                        )
-                        try:
-                            path = MODEL_DIR / "pm10_24h_model.pkl"
-                            if not path.is_file():
-                                raise FileNotFoundError(f"Missing {path.name}")
-                            saved = load_avg_model(24)
-                            if not (isinstance(saved, dict)
-                                    and "model" in saved and "features" in saved):
-                                raise ValueError(
-                                    "24-hour model must contain 'model' and 'features'."
-                                )
-                            values = build_features_avg(lookback, origin, *origin_weather)
-                            prediction = safely_predict_forward(
-                                saved["model"], list(saved["features"]), values
-                            )
-                            render_forecast_result(lookback, origin, "PM10", prediction, 24)
-                        except (ValueError, KeyError, AttributeError, FileNotFoundError) as exc:
-                            st.warning(f"Cannot calculate 24-hour PM10 forecast: {exc}")
-
-                    st.caption(
-                        "Weather values are taken from observations at the origin, or from a "
-                        "clearly disclosed recent-observation carry-forward assumption. "
-                        "No future observed values are used. Forecast values are not verified here "
-                        "against the final training notebook. The results are an academic "
-                        "end-of-data demonstration, not official public-health warnings."
-                    )
+                st.write(f"**Forecast origin:** {end_time:%d %B %Y, %H:%M}")
+                st.caption("Models use only pollutant history and calendar information. "
+                           "Missing wind speed is not replaced with invented measurements.")
+                one_hour, one_day = st.tabs(["Next 1 Hour", "Next 24 Hours"])
+                with one_hour:
+                    c1, c2 = st.columns(2)
+                    with c1: forward_card(window, end_time, "PM10", 1)
+                    with c2: forward_card(window, end_time, "NO2", 1)
+                with one_day:
+                    c1, c2 = st.columns(2)
+                    with c1: forward_card(window, end_time, "PM10", 24)
+                    with c2: forward_card(window, end_time, "NO2", 24)
+                st.info("Demonstration only. These are forecasts beyond the stored dataset "
+                        "endpoint, not live forecasts or official health warnings.")
 except Exception as exc:
-    st.error("Future forecasting cannot access the cloud database. Check Supabase settings.")
-    st.caption(f"Technical details: {type(exc).__name__}: {exc}")
+    st.warning("Cannot load forward forecast inputs from Supabase.")
+    st.caption(f"Details: {type(exc).__name__}: {exc}")
 
-st.caption("Data: Henderson air quality monitoring site. Supabase REST API (read-only).")
+st.caption("Data: Henderson air-quality monitoring site · Supabase REST API (read-only).")
