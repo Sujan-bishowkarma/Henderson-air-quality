@@ -2,8 +2,8 @@
 from pathlib import Path
 import pandas as pd
 
-data_path = Path(r"C:\Users\suraj\Downloads\henderson_clean_final_data.csv")
-flags_path = Path(r"C:\Users\suraj\Downloads\henderson_measured_flags.csv")
+data_path = Path("data/henderson_clean_final_data.csv")
+flags_path = Path("data/henderson_measured_flags.csv")
 
 for path in (data_path, flags_path):
     if not path.is_file():
