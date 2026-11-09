@@ -342,6 +342,10 @@ def feature_names(model, target=None):
     Some saved LightGBM sklearn models do not expose feature_names_in_ after
     environment version changes. Never invent an ordering for unknown models.
     """
+    if isinstance(model, dict):
+        if "features" in model and "model" in model:
+            return list(model["features"])
+        raise ValueError("Saved model bundle has no 'features' list. Re-export with metadata.")
     for attr in ("feature_names_in_", "feature_name_"):
         try:
             names = getattr(model, attr, None)
@@ -370,7 +374,21 @@ def feature_names(model, target=None):
 
 
 def predict_saved_model(model, X):
-    """Predict using saved model; fall back to LightGBM Booster on wrapper compatibility errors."""
+    """Predict from estimator or safely unwrapped notebook model bundle.
+
+    The revised modelling notebook saves dicts containing {'model', 'features'}.
+    This function must never call .predict() on the bundle dictionary itself.
+    """
+    if isinstance(model, dict):
+        if "model" not in model or not hasattr(model["model"], "predict"):
+            raise ValueError("Saved model bundle is missing a usable fitted 'model'.")
+        if "features" in model:
+            cols = list(model["features"])
+            absent = [c for c in cols if c not in X.columns]
+            if absent:
+                raise ValueError("Model features are missing: " + ", ".join(absent))
+            X = X.loc[:, cols]
+        model = model["model"]
     try:
         return float(np.asarray(model.predict(X)).reshape(-1)[0])
     except AttributeError as exc:
@@ -712,6 +730,15 @@ try:
                         + ", ".join(missing_weather)
                         + ". A verified weather source or retrained weather-free model is needed."
                     )
+                    with st.expander("Why is the future forecast unavailable? Inspect recent weather readings"):
+                        st.caption("Recent observations only; no missing weather values have been invented.")
+                        recent_weather = lookback[["temp", "rh", "ws"]].tail(48).copy()
+                        st.dataframe(recent_weather, width="stretch")
+                        st.write("Non-missing values in recent 48 hours:")
+                        st.write(recent_weather.notna().sum().to_dict())
+                        st.info("If wind speed is unavailable, check the Supabase import and original workbook. "
+                                "If no valid measurements exist, obtain verified input data or retrain and "
+                                "validate a model without wind speed.")
                 else:
                     origin_weather = tuple(chosen_weather)
                     if used_fallback:
