@@ -1,4 +1,4 @@
-# Henderson Air Quality Dashboard (Streamlit) — revised prediction tables
+# Henderson Air Quality Dashboard (Streamlit)
 # Reads data from the Supabase cloud database through its REST API.
 # Run with:  streamlit run app.py
 
@@ -72,7 +72,7 @@ col = pollutant.lower()
 
 dates = st.sidebar.date_input(
     "Date range",
-    value=(date(2023, 1, 23), date(2023, 1, 31)),
+    value=(date(2019, 1, 1), date(2019, 12, 31)),
     min_value=date(2006, 1, 1),
     max_value=date(2023, 2, 28),
 )
@@ -266,7 +266,7 @@ else:
         st.caption(f"Henderson, Auckland · {len(wind):,} hours with wind direction")
     c_polar.plotly_chart(polar_plot(col, "NO₂" if pollutant == "NO2" else "PM10"), width="stretch")
 
-# ---------- revised validation-selected model results (held-out test period) ----------
+# ---------- model results (test set: last 20% of hours) ----------
 
 st.subheader("Forecast: actual vs predicted")
 
@@ -277,10 +277,10 @@ if pollutant == "PM10":
                        format_func=lambda h: {1: "Next hour", 3: "Next 3-hour average (main)",
                                               24: "Next 24-hour average"}[h])
 
-p_start, p_end = max(start, date(2019, 9, 24)), min(end_excl, date(2023, 3, 1))
+p_start, p_end = max(start, date(2017, 7, 15)), min(end_excl, date(2023, 3, 1))
 
 if p_start >= p_end:
-    st.info("Revised model predictions cover 24 September 2019 to February 2023. Choose dates in that period to see them.")
+    st.info("Model predictions cover the test set (mid-2017/2019 to February 2023). Choose dates in that period to see them.")
 else:
     if horizon == 1:
         pred = load_table("predictions", p_start, p_end, pollutant=pollutant)
@@ -291,19 +291,10 @@ else:
         st.info("No predictions for this period.")
     else:
         model_name = pred["model"].iloc[0]
-        # Metrics for the selected date range, not necessarily the full test set.
-        pred = pred.copy()
-        pred["actual"] = pd.to_numeric(pred["actual"], errors="coerce")
-        pred["predicted"] = pd.to_numeric(pred["predicted"], errors="coerce")
-        pred = pred.dropna(subset=["actual", "predicted"])
-        if pred.empty:
-            st.info("No valid actual/predicted pairs for the chosen dates.")
-            st.stop()
         err = pred["predicted"] - pred["actual"]
         mae = err.abs().mean()
         rmse = np.sqrt((err ** 2).mean())
-        denom = ((pred["actual"] - pred["actual"].mean()) ** 2).sum()
-        r2 = 1 - (err ** 2).sum() / denom if denom > 0 else float("nan")
+        r2 = 1 - (err ** 2).sum() / ((pred["actual"] - pred["actual"].mean()) ** 2).sum()
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Model", model_name)
@@ -318,156 +309,371 @@ else:
                       labels={pollutant: f"{pollutant} (µg/m³)", "datetime": "Date"})
         fig.update_layout(height=380)
         st.plotly_chart(fig, width="stretch")
-        st.caption("These metrics are recalculated for the selected dates, not the full held-out test set. Zoom in to inspect hourly forecasts.")
+        st.caption("Metrics are for the selected period only. Tip: zoom in on the chart to see hourly detail.")
 
 
-# ---------- historical what-if forecasting using validated model packages ----------
+# ---------- live prediction (only the selected pollutant) ----------
 
-st.subheader(f"Historical what-if {pollutant} forecast")
-st.caption(
-    "Historical simulation only — not a real-time monitoring feed. "
-    "Forecasts below use locally saved, validation-selected models. "
-    "The preceding charts display published Supabase test-set predictions."
-)
+st.subheader(f"Historical {pollutant} forecast demonstration")
+st.caption("Pick a date and hour. The app reads the previous 24 hours from the cloud database, "
+           "builds the same features used in training, and predicts with the saved best model.")
 
 MODEL_DIR = Path(__file__).parent / "models"
-MODEL_FILES = {
-    "NO2_next_hour": "best_model_NO2.pkl",
-    "PM10_next_hour": "best_model_PM10.pkl",
-    "PM10_next_3h_average": "pm10_3h_model.pkl",
-    "PM10_next_24h_average": "pm10_24h_model.pkl",
-}
 
 @st.cache_resource
-def load_validated_model(task):
-    package = joblib.load(MODEL_DIR / MODEL_FILES[task])
-    if not isinstance(package, dict) or not all(k in package for k in ("model", "features", "name")):
-        raise ValueError("Model file must contain model, features, and name")
-    if package["name"] != "LightGBM":
-        raise ValueError("Expected the final validated LightGBM model")
-    return package
+def load_model(name):
+    return joblib.load(MODEL_DIR / f"best_model_{name}.pkl")
 
+@st.cache_resource
+def load_avg_model(hours):
+    path = MODEL_DIR / f"pm10_{hours}h_model.pkl"
+    return joblib.load(path) if path.exists() else None
 
-def make_model_row(past, now, pollutant, weather):
-    """Use measurements at/before now only, with the training feature definitions."""
-    s = past[pollutant.lower()]
+def feature_names(model):
+    # scikit-learn and LightGBM store the training column names differently
+    if hasattr(model, "feature_names_in_"):
+        return list(model.feature_names_in_)
+    return list(model.feature_name_)
+
+def build_features(window, t, now, temp, rh, ws):
+    # same features as make_features() in the modelling notebook (next hour)
+    s = window[t.lower()]
     row = {
         "hour": now.hour,
         "month": now.month,
         "dayofweek": now.weekday(),
         "is_weekend": int(now.weekday() >= 5),
-        "Temp": weather["Temp"],
-        "RH": weather["RH"],
-        "WS": weather["WS"],
+        "Temp": temp,
+        "RH": rh,
+        "WS": ws,
+        f"{t}_lag0": s.get(now),
+        f"{t}_lag1": s.get(now - timedelta(hours=1)),
+        f"{t}_lag2": s.get(now - timedelta(hours=2)),
+        f"{t}_lag3": s.get(now - timedelta(hours=3)),
+        f"{t}_lag24": s.get(now - timedelta(hours=24)),
+        f"{t}_roll3": s.loc[now - timedelta(hours=2): now].mean(),
+        f"{t}_roll24": s.loc[now - timedelta(hours=23): now].mean(),
     }
-    if pollutant == "PM10":
-        row["fireworks_days"] = int(now.month == 11 and now.day in (4, 5, 6))
-        row["era_2017"] = int(now.year >= 2017)
-    for lag in (0, 1, 2, 3, 24):
-        row[f"{pollutant}_lag{lag}"] = s.get(now - timedelta(hours=lag), np.nan)
-    last3 = s.loc[now - timedelta(hours=2): now]
-    last24 = s.loc[now - timedelta(hours=23): now]
-    if pollutant == "PM10":
-        row["PM10_roll3"] = last3.mean() if last3.notna().sum() >= 2 else np.nan
-        row["PM10_roll24"] = last24.mean() if last24.notna().sum() >= 18 else np.nan
-        row["PM10_std24"] = last24.std() if last24.notna().sum() >= 18 else np.nan
-        other = past["no2"]
-        other24 = other.loc[now - timedelta(hours=23): now]
-        row["NO2_lag0"] = other.get(now, np.nan)
-        row["NO2_roll24"] = other24.mean() if other24.notna().sum() >= 18 else np.nan
-    else:
-        row["NO2_roll3"] = last3.mean() if last3.notna().sum() == 3 else np.nan
-        row["NO2_roll24"] = last24.mean() if last24.notna().sum() == 24 else np.nan
     return pd.DataFrame([row])
 
+def build_features_avg(window, now, temp, rh, ws):
+    # same features as make_pm10_avg() in the modelling notebook (3-hour average)
+    s, n = window["pm10"], window["no2"]
+    last24 = s.loc[now - timedelta(hours=23): now]
+    no2_24 = n.loc[now - timedelta(hours=23): now]
+    last3 = s.loc[now - timedelta(hours=2): now]
+    row = {
+        "hour": now.hour,
+        "month": now.month,
+        "dayofweek": now.weekday(),
+        "is_weekend": int(now.weekday() >= 5),
+        "fireworks_days": int(now.month == 11 and now.day in (4, 5, 6)),
+        "era_2017": int(now.year >= 2017),
+        "Temp": temp, "RH": rh, "WS": ws,
+        "PM10_lag0": s.get(now),
+        "PM10_lag1": s.get(now - timedelta(hours=1)),
+        "PM10_lag2": s.get(now - timedelta(hours=2)),
+        "PM10_lag3": s.get(now - timedelta(hours=3)),
+        "PM10_lag24": s.get(now - timedelta(hours=24)),
+        "PM10_roll3": last3.mean() if last3.notna().sum() >= 2 else np.nan,
+        "PM10_roll24": last24.mean() if last24.notna().sum() >= 18 else np.nan,
+        "PM10_std24": last24.std() if last24.notna().sum() >= 18 else np.nan,
+        "NO2_lag0": n.get(now),
+        "NO2_roll24": no2_24.mean() if no2_24.notna().sum() >= 18 else np.nan,
+    }
+    return pd.DataFrame([row]).astype(float)
 
-pick1, pick2, pick3 = st.columns(3)
-chosen_day = pick1.date_input(
-    "Forecast date", value=date(2023, 1, 25),
-    min_value=date(2006, 1, 2), max_value=date(2023, 2, 27), key="forecast_date"
-)
-chosen_hour = pick2.selectbox("Forecast origin hour", list(range(24)), index=12,
-                              format_func=lambda h: f"{h:02d}:00")
-if pollutant == "NO2":
-    task = "NO2_next_hour"
-    pick3.caption("Forecast: next hour")
-else:
-    chosen_horizon = pick3.selectbox("Forecast horizon", [1, 3, 24], index=1,
-                                     format_func=lambda h: {1: "Next hour", 3: "Next 3-hour average", 24: "Next 24-hour average"}[h])
-    task = {1: "PM10_next_hour", 3: "PM10_next_3h_average", 24: "PM10_next_24h_average"}[chosen_horizon]
+def forecast_chart(recent, x_pred, pred, x_actual=None, actual=None, label="Predicted"):
+    fig = px.line(x=recent.index, y=recent.values, markers=True, labels={"x": "", "y": f"{pollutant} (µg/m³)"})
+    fig.add_scatter(x=x_pred, y=[pred] * len(x_pred), mode="lines+markers", name=label,
+                    line=dict(color="orange", width=3), marker=dict(size=10, color="orange", symbol="star"))
+    if actual is not None and pd.notna(actual):
+        fig.add_scatter(x=x_actual, y=[actual] * len(x_actual), mode="lines+markers", name="Actual",
+                        line=dict(color="blue", width=3, dash="dot"), marker=dict(size=8, color="blue"))
+    fig.update_layout(height=300, showlegend=True, margin=dict(t=10),
+                      legend=dict(orientation="h", y=1.1))
+    return fig
 
-now = datetime.combine(chosen_day, time(chosen_hour))
-forecast_hours = 1 if pollutant == "NO2" else chosen_horizon
+l1, l2 = st.columns(2)
+pick_day = l1.date_input("Date", value=date(2019, 7, 10),
+                         min_value=date(2006, 1, 2), max_value=date(2023, 2, 28), key="live_day")
+pick_hour = l2.selectbox("Current hour", list(range(24)), index=17,
+                         format_func=lambda h: f"{h:02d}:00", key="live_hour")
+now = datetime.combine(pick_day, time(pick_hour))
+nxt = now + timedelta(hours=1)
 
-# Include preceding measurements for lag features, and subsequent measurements
-# solely to show the actual outcome AFTER the prediction has been calculated.
-window = load_table("air_quality", now - timedelta(hours=30),
-                    now + timedelta(hours=forecast_hours + 1))
+window = load_table("air_quality", now - timedelta(hours=24), now + timedelta(hours=4))
 if window.empty:
-    st.info("No observations available near this date.")
+    st.warning("No data around this time.")
+    st.stop()
+window = window.set_index("datetime").sort_index()
+
+if now not in window.index or window.loc[now, ["temp", "rh", "ws"]].isna().any():
+    st.warning("Weather data is missing at this hour. Try another date (2019 has complete data).")
+    st.stop()
+
+# what-if: start from the real weather, let the user change it
+with st.expander("What if the weather were different? (optional)"):
+    w1, w2, w3 = st.columns(3)
+    temp = w1.slider("Temperature (°C)", -2.0, 32.0, float(window.loc[now, "temp"]), 0.5)
+    rh = w2.slider("Humidity (%)", 10.0, 100.0, float(window.loc[now, "rh"]), 1.0)
+    ws = w3.slider("Wind speed (m/s)", 0.0, 11.0, float(window.loc[now, "ws"]), 0.1)
+
+series = window[col]
+recent = series.loc[:now]
+now_val = series.get(now)
+
+# next hour (both pollutants)
+def next_hour_block(box):
+    with box:
+        st.markdown(f"**Next hour: {nxt:%d %b %Y %H:00}**")
+        X = build_features(window, pollutant, now, temp, rh, ws)
+        if X.isna().any(axis=None):
+            st.info("Not enough past data (gaps in the previous 24 hours) to predict.")
+            return
+        model = load_model(pollutant)
+        pred = max(float(model.predict(X[feature_names(model)])[0]), 0)
+        actual = series.get(nxt)
+        st.metric("Predicted", f"{pred:.1f} µg/m³", f"{pred - now_val:+.1f} vs now")
+        if actual is not None and pd.notna(actual):
+            st.caption(f"Now: {now_val:.1f} · Actual next hour: {actual:.1f} µg/m³")
+        st.plotly_chart(forecast_chart(recent, [nxt], pred, [nxt], actual), width="stretch")
+
+# next 3-hour average (PM10 only: the main PM10 forecast)
+def three_hour_block(box):
+    with box:
+        h1, h3 = now + timedelta(hours=1), now + timedelta(hours=3)
+        st.markdown(f"**Next 3-hour average: {h1:%H:00}–{h3:%H:00} (main)**")
+        saved = load_avg_model(3)
+        if saved is None:
+            st.info("Add models/pm10_3h_model.pkl (saved by the modelling notebook) to show this forecast.")
+            return
+        X = build_features_avg(window, now, temp, rh, ws)
+        if pd.isna(X["PM10_lag0"].iloc[0]):
+            st.info("PM10 is missing at this hour, so the forecast can't be made.")
+            return
+        pred = max(float(saved["model"].predict(X[saved["features"]])[0]), 0)
+        next3 = series.loc[h1:h3]
+        actual = next3.mean() if next3.notna().sum() >= 2 else None
+        st.metric("Predicted average", f"{pred:.1f} µg/m³", f"{pred - now_val:+.1f} vs now")
+        if actual is not None:
+            st.caption(f"Now: {now_val:.1f} · Actual 3-hour average: {actual:.1f} µg/m³")
+        hours = [h1, now + timedelta(hours=2), h3]
+        st.plotly_chart(forecast_chart(recent, hours, pred, hours, actual, label="Predicted average"),
+                        width="stretch")
+        st.caption(f"Model: {saved['name']}")
+
+if now_val is None or pd.isna(now_val):
+    st.info(f"{pollutant} is missing at this hour. Try another hour.")
+elif pollutant == "PM10":
+    c1, c2 = st.columns(2)
+    three_hour_block(c1)
+    next_hour_block(c2)
+    st.caption("Hourly PM10 is noisy, so the 3-hour average is the main PM10 forecast. "
+               "The next-hour forecast is shown for comparison.")
 else:
-    window = window.set_index("datetime").sort_index()
-    past = window.loc[:now].copy()  # never use measurements later than now as features
-    required = ["temp", "rh", "ws", pollutant.lower()]
-    if now not in past.index or past.loc[now, required].isna().any():
-        st.info("Current-hour weather or pollutant data is missing. Select another hour.")
-    else:
-        with st.expander("What if the weather were different? (optional)"):
-            a, b, c = st.columns(3)
-            temp = a.slider("Temperature (°C)", -10.0, 40.0, float(past.loc[now, "temp"]), 0.5)
-            rh = b.slider("Humidity (%)", 0.0, 100.0, float(past.loc[now, "rh"]), 1.0)
-            ws = c.slider("Wind speed (m/s)", 0.0, 25.0, float(past.loc[now, "ws"]), 0.1)
-        try:
-            package = load_validated_model(task)
-            X = make_model_row(past, now, pollutant, {"Temp": temp, "RH": rh, "WS": ws})
-            features = package["features"]
-            missing = [f for f in features if f not in X.columns]
-            if missing:
-                st.error(f"Model and dashboard feature definitions differ: {missing}")
-            elif X[features].isna().any(axis=None):
-                st.info("Some required past-hour features are missing; select another hour.")
-            else:
-                estimate = max(0.0, float(package["model"].predict(X[features])[0]))
-                st.metric(f"Predicted {pollutant} ({forecast_hours}h)", f"{estimate:.2f} µg/m³")
-                future = window.loc[now + timedelta(hours=1): now + timedelta(hours=forecast_hours), pollutant.lower()]
-                if len(future) == forecast_hours and future.notna().all():
-                    observed = float(future.mean())
-                    st.caption(f"Observed following {forecast_hours}h: {observed:.2f} µg/m³")
+    next_hour_block(st.container())
 
-                    # Compare this one historical what-if prediction with its observed outcome.
-                    comparison = go.Figure()
-                    comparison.add_trace(go.Bar(
-                        x=["Predicted", "Observed"],
-                        y=[estimate, observed],
-                        text=[f"{estimate:.2f}", f"{observed:.2f}"],
-                        textposition="outside",
-                        marker_color=["#E58E26", "#3978B9"],
-                        hovertemplate="%{x}: %{y:.2f} µg/m³<extra></extra>",
-                    ))
-                    comparison.update_layout(
-                        title=f"{pollutant}: Actual vs Predicted ({forecast_hours}-hour forecast)",
-                        xaxis_title=None,
-                        yaxis_title="Concentration (µg/m³)",
-                        yaxis=dict(range=[0, max(estimate, observed, 1) * 1.25]),
-                        height=350,
-                        showlegend=False,
-                        margin=dict(t=55, b=35, l=35, r=25),
-                    )
-                    st.plotly_chart(comparison, use_container_width=True)
-                    st.caption(
-                        "Comparison for the selected historical forecast only; "
-                        "the graph is not an overall model performance measure."
-                    )
-                else:
-                    st.caption("Actual outcome unavailable or incomplete for this period.")
-                st.caption(f"Saved model: {package['name']} · {len(features)} input features")
-        except (FileNotFoundError, ValueError, KeyError, AttributeError, ImportError) as exc:
-            st.error(f"Cannot load or evaluate the updated model: {exc}")
-            st.info("Check that all four revised .pkl files are in the models folder and LightGBM is installed.")
+# ---------- end-of-dataset future forecasts: next hour / next 24h ----------
+# A forward-only demonstration: all model inputs are sourced at or before the
+# latest available air-quality timestamp. This is NOT a real-time 2026 forecast.
 
+st.divider()
+st.header("Future Air Quality Forecast")
 st.caption(
-    "Henderson historical measurements · Supabase REST API (read-only). "
-    "Interactive forecasts use historical stored inputs, which should be checked against "
-    "the final forward-only preprocessing rules before claiming exact reproduction "
-    "of the notebook's held-out scores. Monitoring site map location is approximate."
+    "Forecasts beyond the latest stored observation, using saved LightGBM models. "
+    "If the database ends in February 2023, these are forecasts from that historical "
+    "endpoint—not today's Auckland air quality."
 )
+
+@st.cache_data(ttl=3600)
+def get_latest_observation_time():
+    result = (get_client().table("air_quality")
+              .select("datetime")
+              .order("datetime", desc=True)
+              .limit(1).execute())
+    records = result.data or []
+    return pd.Timestamp(records[0]["datetime"]) if records else None
+
+
+def safely_predict_forward(model, required_features, values):
+    """Ensure inference uses complete historical features in training order."""
+    missing = [f for f in required_features if f not in values.columns]
+    if missing:
+        raise ValueError("Model input columns missing: " + ", ".join(missing))
+    X = values.loc[:, required_features]
+    if not np.isfinite(X.to_numpy(dtype=float)).all():
+        raise ValueError("Historical inputs contain missing/non-finite features.")
+    return max(0.0, float(model.predict(X)[0]))
+
+
+def future_history_chart(history, origin, target, prediction, hours):
+    """Screenshot-style graph: blue history and orange forecast star.
+
+    For 24h, the star represents ONE mean across the shaded 24h period,
+    not a sequence of hourly values. No unavailable future actual is plotted.
+    """
+    past = history[target.lower()].loc[:origin].tail(25).dropna()
+    first = origin + timedelta(hours=1)
+    end = origin + timedelta(hours=hours)
+    # Represent the 24h average at its period-end timestamp, not every hour.
+    point_time = first if hours == 1 else end
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[point_time], y=[prediction], mode="markers",
+        name="Predicted", marker=dict(color="#FF9900", size=15, symbol="star"),
+        hovertemplate=("Predicted: %{y:.2f} µg/m³<extra></extra>"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=past.index, y=past.values, mode="lines+markers", name="Actual (historical)",
+        line=dict(color="#0866D8", width=2),
+        marker=dict(color="#0866D8", size=5),
+        hovertemplate="%{x|%d %b %Y %H:%M}<br>Observed: %{y:.2f} µg/m³<extra></extra>",
+    ))
+    if hours == 24:
+        fig.add_vrect(
+            x0=first, x1=end, fillcolor="#FFB347", opacity=0.14,
+            line_width=0,
+            annotation_text="Next 24h: mean over shaded period",
+            annotation_position="top left",
+        )
+    fig.add_vline(x=origin.timestamp() * 1000, line_color="#777777", line_dash="dot")
+    fig.update_layout(
+        title=None,
+        xaxis_title=None,
+        yaxis_title=f"{target} (µg/m³)",
+        height=350,
+        hovermode="closest",
+        legend=dict(orientation="h", y=1.15, x=0),
+        margin=dict(t=35, b=45, l=50, r=30),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#E8EEF4", zeroline=False)
+    return fig
+
+
+def render_forecast_result(history, origin, target, prediction, hours):
+    """Screenshot-style summary (date, predicted value, delta, and graph)."""
+    start_future = origin + timedelta(hours=1)
+    end_future = origin + timedelta(hours=hours)
+    if hours == 1:
+        st.markdown(f"**Next hour: {start_future:%d %b %Y %H:%M}**")
+    else:
+        st.markdown(
+            f"**Next 24-hour average: {start_future:%d %b %Y %H:%M} "
+            f"to {end_future:%d %b %Y %H:%M}**"
+        )
+    current_value = history[target.lower()].loc[:origin].dropna()
+    latest = float(current_value.iloc[-1]) if not current_value.empty else None
+    delta = (f"{prediction - latest:+.1f} vs last observed hour"
+             if latest is not None else None)
+    st.metric("Predicted" if hours == 1 else "Predicted 24h average",
+              f"{prediction:.2f} µg/m³", delta=delta,
+              delta_color="off" if hours == 24 else "normal")
+    if latest is not None:
+        st.caption(f"Last observed {target}: {latest:.2f} µg/m³ · "
+                   "No future actual measurement is available for comparison.")
+    else:
+        st.caption("No future actual measurement is available for comparison.")
+    st.plotly_chart(
+        future_history_chart(history, origin, target, prediction, hours),
+        width="stretch",
+    )
+    if hours == 24:
+        st.caption(
+            "The orange star is the predicted **average** across the shaded "
+            "24-hour interval; it is not an individual hourly prediction."
+        )
+    st.caption("Blue line = previously observed readings · Orange star = future forecast · "
+               "Dotted line = forecast origin")
+
+try:
+    last_stored = get_latest_observation_time()
+    if last_stored is None:
+        st.warning("No observations were found in the database.")
+    else:
+        forecast_origin = last_stored.to_pydatetime()
+        # Only query records through the origin (exclusive upper bound).
+        lookback = load_table(
+            "air_quality",
+            forecast_origin - timedelta(hours=48),
+            forecast_origin + timedelta(microseconds=1),
+        )
+        if lookback.empty:
+            st.warning("Not enough historical data to generate a future forecast.")
+        else:
+            lookback = lookback.set_index("datetime").sort_index()
+            lookback = lookback.loc[lookback.index <= last_stored]
+            origin = lookback.index.max().to_pydatetime()
+            st.write(f"**Forecast starts after:** {origin:%d %B %Y at %H:%M}")
+            if origin != forecast_origin:
+                st.warning("Latest observation could not be recovered from the historical window.")
+            else:
+                weather_at_origin = lookback.loc[last_stored]
+                if isinstance(weather_at_origin, pd.DataFrame):
+                    weather_at_origin = weather_at_origin.iloc[-1]
+                required_weather = ("temp", "rh", "ws")
+                if any(v not in weather_at_origin.index or pd.isna(weather_at_origin[v])
+                       for v in required_weather):
+                    st.warning("Latest weather inputs are incomplete; forecasts cannot run safely.")
+                else:
+                    origin_weather = tuple(float(weather_at_origin[v]) for v in required_weather)
+                    tab_hour, tab_day = st.tabs(["Next 1 Hour", "Next 24 Hours"])
+
+                    with tab_hour:
+                        st.markdown("**One-hour-ahead pollutant concentration**")
+                        c_pm10, c_no2 = st.columns(2)
+                        for holder, target in [(c_pm10, "PM10"), (c_no2, "NO2")]:
+                            with holder:
+                                st.markdown(f"#### {target}")
+                                try:
+                                    path = MODEL_DIR / f"best_model_{target}.pkl"
+                                    if not path.is_file():
+                                        raise FileNotFoundError(f"Missing {path.name}")
+                                    fitted = load_model(target)
+                                    values = build_features(lookback, target, origin, *origin_weather)
+                                    prediction = safely_predict_forward(
+                                        fitted, feature_names(fitted), values
+                                    )
+                                    render_forecast_result(lookback, origin, target, prediction, 1)
+                                except (ValueError, KeyError, AttributeError, FileNotFoundError) as exc:
+                                    st.warning(f"Cannot calculate {target} forecast: {exc}")
+
+                    with tab_day:
+                        st.markdown("**PM10 average concentration over the next 24 hours**")
+                        st.caption(
+                            "A 24-hour mean is different from a 24-hour sequence of "
+                            "individual hourly forecasts. No saved 24-hour NO₂ model "
+                            "has been confirmed in this project."
+                        )
+                        try:
+                            path = MODEL_DIR / "pm10_24h_model.pkl"
+                            if not path.is_file():
+                                raise FileNotFoundError(f"Missing {path.name}")
+                            saved = load_avg_model(24)
+                            if not (isinstance(saved, dict)
+                                    and "model" in saved and "features" in saved):
+                                raise ValueError(
+                                    "24-hour model must contain 'model' and 'features'."
+                                )
+                            values = build_features_avg(lookback, origin, *origin_weather)
+                            prediction = safely_predict_forward(
+                                saved["model"], list(saved["features"]), values
+                            )
+                            render_forecast_result(lookback, origin, "PM10", prediction, 24)
+                        except (ValueError, KeyError, AttributeError, FileNotFoundError) as exc:
+                            st.warning(f"Cannot calculate 24-hour PM10 forecast: {exc}")
+
+                    st.caption(
+                        "Both tabs use weather measured at the forecast origin, not a "
+                        "future weather forecast. Forecast values are not verified here "
+                        "against the final training notebook. The results are an academic "
+                        "end-of-data demonstration, not official public-health warnings."
+                    )
+except Exception as exc:
+    st.error("Future forecasting cannot access the cloud database. Check Supabase settings.")
+    st.caption(f"Technical details: {type(exc).__name__}: {exc}")
+
+st.caption("Data: Henderson air quality monitoring site. Supabase REST API (read-only).")
