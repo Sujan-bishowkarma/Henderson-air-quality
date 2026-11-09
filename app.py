@@ -710,15 +710,14 @@ try:
                 st.write(f"**Forecast origin:** {end_time:%d %B %Y, %H:%M}")
                 st.caption("Models use only pollutant history and calendar information. "
                            "Missing wind speed is not replaced with invented measurements.")
+                # Respect the existing pollutant filter in the sidebar.
+                # No extra selection is needed in the forecast section.
+                st.caption(f"Showing forecasts for: {pollutant}")
                 one_hour, one_day = st.tabs(["Next 1 Hour", "Next 24 Hours"])
                 with one_hour:
-                    c1, c2 = st.columns(2)
-                    with c1: forward_card(window, end_time, "PM10", 1)
-                    with c2: forward_card(window, end_time, "NO2", 1)
+                    forward_card(window, end_time, pollutant, 1)
                 with one_day:
-                    c1, c2 = st.columns(2)
-                    with c1: forward_card(window, end_time, "PM10", 24)
-                    with c2: forward_card(window, end_time, "NO2", 24)
+                    forward_card(window, end_time, pollutant, 24)
                 st.info("Demonstration only. These are forecasts beyond the stored dataset "
                         "endpoint, not live forecasts or official health warnings.")
 except Exception as exc:
