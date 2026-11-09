@@ -330,10 +330,36 @@ def load_avg_model(hours):
     return joblib.load(path) if path.exists() else None
 
 def feature_names(model):
-    # scikit-learn and LightGBM store the training column names differently
-    if hasattr(model, "feature_names_in_"):
-        return list(model.feature_names_in_)
-    return list(model.feature_name_)
+    """Read persisted feature order across sklearn/LightGBM versions."""
+    for attr in ("feature_names_in_", "feature_name_"):
+        try:
+            names = getattr(model, attr, None)
+            if names is not None and len(names):
+                return list(names)
+        except (AttributeError, TypeError, ValueError):
+            pass
+    booster = getattr(model, "booster_", None)
+    if booster is not None and hasattr(booster, "feature_name"):
+        return list(booster.feature_name())
+    raise ValueError("Saved model does not expose the training feature names. Re-export it from the notebook.")
+
+
+def predict_saved_model(model, X):
+    """Predict using saved model; fall back to LightGBM Booster on wrapper compatibility errors."""
+    try:
+        return float(np.asarray(model.predict(X)).reshape(-1)[0])
+    except AttributeError as exc:
+        booster = getattr(model, "booster_", None)
+        if booster is None or not hasattr(booster, "predict"):
+            raise ValueError(
+                "The saved model cannot be used with the deployed library versions. "
+                "Re-save the fitted model using matching versions. "
+                f"Original error: {exc}"
+            ) from exc
+        try:
+            return float(np.asarray(booster.predict(X)).reshape(-1)[0])
+        except Exception as inner:
+            raise ValueError(f"LightGBM Booster prediction failed: {inner}") from inner
 
 def build_features(window, t, now, temp, rh, ws):
     # same features as make_features() in the modelling notebook (next hour)
@@ -431,8 +457,18 @@ def next_hour_block(box):
         if X.isna().any(axis=None):
             st.info("Not enough past data (gaps in the previous 24 hours) to predict.")
             return
-        model = load_model(pollutant)
-        pred = max(float(model.predict(X[feature_names(model)])[0]), 0)
+        try:
+            model = load_model(pollutant)
+            required = feature_names(model)
+            missing = [c for c in required if c not in X.columns]
+            if missing:
+                st.error("Missing model features: " + ", ".join(missing))
+                return
+            pred = max(predict_saved_model(model, X[required]), 0.0)
+        except (AttributeError, ValueError, KeyError, FileNotFoundError, ImportError) as exc:
+            st.error(f"Unable to calculate {pollutant} next-hour forecast: {exc}")
+            st.info("Check the deployed model file and pin the same LightGBM/scikit-learn versions used when saving it.")
+            return
         actual = series.get(nxt)
         st.metric("Predicted", f"{pred:.1f} µg/m³", f"{pred - now_val:+.1f} vs now")
         if actual is not None and pd.notna(actual):
@@ -444,7 +480,11 @@ def three_hour_block(box):
     with box:
         h1, h3 = now + timedelta(hours=1), now + timedelta(hours=3)
         st.markdown(f"**Next 3-hour average: {h1:%H:00}–{h3:%H:00} (main)**")
-        saved = load_avg_model(3)
+        try:
+            saved = load_avg_model(3)
+        except (AttributeError, ValueError, FileNotFoundError, ImportError) as exc:
+            st.error(f"Unable to load PM10 three-hour model: {exc}")
+            return
         if saved is None:
             st.info("Add models/pm10_3h_model.pkl (saved by the modelling notebook) to show this forecast.")
             return
@@ -452,7 +492,11 @@ def three_hour_block(box):
         if pd.isna(X["PM10_lag0"].iloc[0]):
             st.info("PM10 is missing at this hour, so the forecast can't be made.")
             return
-        pred = max(float(saved["model"].predict(X[saved["features"]])[0]), 0)
+        try:
+            pred = max(predict_saved_model(saved["model"], X[saved["features"]]), 0.0)
+        except (AttributeError, ValueError, KeyError) as exc:
+            st.error(f"Unable to calculate PM10 three-hour forecast: {exc}")
+            return
         next3 = series.loc[h1:h3]
         actual = next3.mean() if next3.notna().sum() >= 2 else None
         st.metric("Predicted average", f"{pred:.1f} µg/m³", f"{pred - now_val:+.1f} vs now")
@@ -504,7 +548,7 @@ def safely_predict_forward(model, required_features, values):
     X = values.loc[:, required_features]
     if not np.isfinite(X.to_numpy(dtype=float)).all():
         raise ValueError("Historical inputs contain missing/non-finite features.")
-    return max(0.0, float(model.predict(X)[0]))
+    return max(0.0, predict_saved_model(model, X))
 
 
 def future_history_chart(history, origin, target, prediction, hours):
