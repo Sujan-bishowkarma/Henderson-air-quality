@@ -1,125 +1,603 @@
-# CELL 1 — Load your existing prepared data and measured-value flags
+# Henderson Air Quality Dashboard (Streamlit)
+# Reads data from the Supabase cloud database through its REST API.
+# Run with:  streamlit run app.py
+# Deploy this file at the repository ROOT as app.py.
+# IMPORTANT: This is an application, NOT a model-training notebook.
+# Historical data is loaded from Supabase; do not add laptop-local CSV paths.
+# To display the 24 hourly forecast line, deploy 46 files named
+# direct_{PM10|NO2}_{2..24}h.pkl alongside the existing forward_* models.
+
+
+import os
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
-import pandas as pd
 
-data_path = Path(r"C:\Users\suraj\Downloads\henderson_clean_final_data.csv")
-flags_path = Path(r"C:\Users\suraj\Downloads\henderson_measured_flags.csv")
+import joblib
 
-for path in (data_path, flags_path):
-    if not path.is_file():
-        raise FileNotFoundError(f"Cannot find {path}. Check the folder/file name.")
-
-df = pd.read_csv(data_path, index_col="datetime", parse_dates=True).sort_index()
-measured = pd.read_csv(flags_path, index_col="datetime", parse_dates=True).sort_index()
-for col in ("PM10", "NO2"):
-    if col not in df.columns or col not in measured.columns:
-        raise KeyError(f"Missing required column {col}")
-    parsed = measured[col].astype("string").str.strip().str.lower().map(
-        {"true": True, "false": False, "1": True, "0": False})
-    if parsed.isna().any():
-        raise ValueError(f"Unknown measured flag values for {col}")
-    measured[col] = parsed.astype(bool)
-if df.index.has_duplicates or measured.index.has_duplicates:
-    raise ValueError("Duplicate timestamps; correct preprocessing first")
-if not df.index.equals(measured.index):
-    raise ValueError("Data and measured flags indexes do not match")
-print("Loaded", len(df), "hourly records:", df.index.min(), "to", df.index.max())
-
-
-# CELL 2 — Train and evaluate NEW 2–24 hour direct forecasts for each pollutant
-# Existing forward_{pollutant}_1h.pkl and forward_{pollutant}_24h.pkl remain untouched.
 import numpy as np
 import pandas as pd
-import joblib
-from pathlib import Path
-from lightgbm import LGBMRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from dotenv import load_dotenv
+from supabase import create_client
 
-source = df[["PM10", "NO2"]].copy().sort_index()
-source.index = pd.to_datetime(source.index)
-observed = measured[["PM10", "NO2"]].copy().sort_index()
-observed.index = pd.to_datetime(observed.index)
+st.set_page_config(page_title="Henderson Air Quality", layout="wide")
 
-hourly_index = pd.date_range(source.index.min(), source.index.max(), freq="h")
-source = source.reindex(hourly_index)
-observed = observed.reindex(hourly_index).fillna(False).astype(bool)
-for pollutant in ("PM10", "NO2"):
-    source[pollutant] = pd.to_numeric(source[pollutant], errors="coerce")
-    source.loc[~observed[pollutant], pollutant] = np.nan
+# monitoring site location (APPROXIMATE: Henderson, Auckland - replace with the exact site coordinates)
+SITE_LAT, SITE_LON = -36.8786, 174.6302
 
-def features_at_origin(target):
+
+# ---------- connection ----------
+
+# keys come from .env on your computer, or from Streamlit secrets when deployed online
+load_dotenv()
+
+def get_secret(name):
+    value = os.getenv(name)
+    if value is None:
+        value = st.secrets[name]
+    return value
+
+@st.cache_resource
+def get_client():
+    return create_client(get_secret("SUPABASE_URL"), get_secret("SUPABASE_KEY"))
+
+
+# ---------- load data through the API ----------
+
+# the API returns max 1000 rows per request, so read in pages of 1000
+@st.cache_data(ttl=3600)
+def load_table(table, start, end, pollutant=None, horizon=None):
+    sb = get_client()
+    rows, page, first = [], 1000, 0
+    while True:
+        query = (sb.table(table).select("*")
+                   .gte("datetime", start.isoformat())
+                   .lt("datetime", end.isoformat()))
+        if pollutant:
+            query = query.eq("pollutant", pollutant)
+        if horizon:
+            query = query.eq("horizon_hours", horizon)
+        batch = query.order("datetime").range(first, first + page - 1).execute().data
+        rows += batch
+        if len(batch) < page:
+            break
+        first += page
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["datetime"] = pd.to_datetime(df["datetime"])
+    return df
+
+
+# ---------- sidebar: user choices ----------
+
+st.sidebar.title("Settings")
+pollutant = st.sidebar.radio("Pollutant", ["PM10", "NO2"])
+col = pollutant.lower()
+
+dates = st.sidebar.date_input(
+    "Date range",
+    value=(date(2019, 1, 1), date(2019, 12, 31)),
+    min_value=date(2006, 1, 1),
+    max_value=date(2023, 2, 28),
+)
+if len(dates) != 2:
+    st.info("Select a start and end date.")
+    st.stop()
+start, end = dates
+end_excl = end + timedelta(days=1)
+
+if (end - start).days > 3 * 365:
+    st.sidebar.warning("Long ranges take longer to load from the API.")
+
+
+# ---------- header ----------
+
+st.title("Henderson Air Quality Dashboard")
+st.caption(f"Hourly {pollutant} and weather at Henderson monitoring site · {start} to {end}")
+
+with st.spinner("Loading data from the cloud database..."):
+    df = load_table("air_quality", start, end_excl)
+
+if df.empty:
+    st.warning("No data for this period.")
+    st.stop()
+
+df = df.set_index("datetime").sort_index()
+
+
+# ---------- key numbers ----------
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric(f"Average {pollutant}", f"{df[col].mean():.1f} µg/m³")
+k2.metric(f"Highest hour", f"{df[col].max():.1f} µg/m³")
+k3.metric("Average wind speed", f"{df['ws'].mean():.1f} m/s")
+k4.metric("Hours with data", f"{df[col].notna().mean() * 100:.0f}%")
+
+
+# ---------- trend over time ----------
+
+st.subheader(f"{pollutant} over time")
+
+# daily averages for long periods, hourly for short ones
+if (end - start).days > 60:
+    trend = df[col].resample("D").mean()
+    label = "Daily average"
+else:
+    trend = df[col]
+    label = "Hourly"
+
+fig = px.line(trend, labels={"value": f"{pollutant} (µg/m³)", "datetime": "Date"})
+fig.update_layout(showlegend=False, title=label, height=350)
+st.plotly_chart(fig, width="stretch")
+
+
+# ---------- patterns ----------
+
+st.subheader("Patterns")
+p1, p2 = st.columns(2)
+
+by_hour = df.groupby(df.index.hour)[col].mean()
+fig = px.line(x=by_hour.index, y=by_hour.values, markers=True,
+              labels={"x": "Hour of day", "y": f"{pollutant} (µg/m³)"},
+              title="Average by hour of day")
+p1.plotly_chart(fig, width="stretch")
+
+bins = [0, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 11]
+names = ["0-0.5", "0.5-1", "1-1.5", "1.5-2", "2-3", "3-4", "4-5", "5-6", "6+"]
+by_wind = df.groupby(pd.cut(df["ws"], bins=bins, labels=names, include_lowest=True),
+                     observed=True)[col].mean()
+fig = px.bar(x=by_wind.index.astype(str), y=by_wind.values,
+             labels={"x": "Wind speed (m/s)", "y": f"{pollutant} (µg/m³)"},
+             title="Average by wind speed")
+p2.plotly_chart(fig, width="stretch")
+
+
+
+# ---------- seasons ----------
+
+st.subheader("Seasons")
+
+# NZ seasons: summer = Dec-Feb, winter = Jun-Aug
+season_map = {12: "Summer", 1: "Summer", 2: "Summer",
+              3: "Autumn", 4: "Autumn", 5: "Autumn",
+              6: "Winter", 7: "Winter", 8: "Winter",
+              9: "Spring", 10: "Spring", 11: "Spring"}
+order = ["Summer", "Autumn", "Winter", "Spring"]
+df["season"] = df.index.month.map(season_map)
+
+s1, s2 = st.columns(2)
+
+# average per season
+by_season = df.groupby("season")[col].mean().reindex(order).dropna()
+fig = px.bar(x=by_season.index, y=by_season.values,
+             color=by_season.index,
+             color_discrete_map={"Summer": "#f4a259", "Autumn": "#bc4b51",
+                                 "Winter": "#5b8e7d", "Spring": "#8cb369"},
+             labels={"x": "Season", "y": f"{pollutant} (µg/m³)"},
+             title="Average by season")
+fig.update_layout(showlegend=False)
+s1.plotly_chart(fig, width="stretch")
+
+# summer vs winter: daily pattern
+sw = df[df["season"].isin(["Summer", "Winter"])]
+if sw["season"].nunique() < 2:
+    s2.info("Choose a date range that includes both summer and winter (e.g. a full year) to compare them.")
+else:
+    profile = sw.groupby(["season", sw.index.hour])[col].mean().reset_index()
+    profile.columns = ["Season", "Hour", col]
+    fig = px.line(profile, x="Hour", y=col, color="Season", markers=True,
+                  color_discrete_map={"Summer": "#f4a259", "Winter": "#5b8e7d"},
+                  labels={col: f"{pollutant} (µg/m³)", "Hour": "Hour of day"},
+                  title="Summer vs winter: average by hour of day")
+    s2.plotly_chart(fig, width="stretch")
+
+    summer = sw.loc[sw["season"] == "Summer", col].mean()
+    winter = sw.loc[sw["season"] == "Winter", col].mean()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Summer average", f"{summer:.1f} µg/m³")
+    c2.metric("Winter average", f"{winter:.1f} µg/m³")
+    c3.metric("Winter vs summer", f"{(winter / summer - 1) * 100:+.0f}%")
+
+
+# ---------- wind direction polar plots ----------
+
+st.subheader("Wind direction and pollution")
+st.caption("Wind direction was only recorded from September 2022 to February 2023, so these plots always use that period. "
+           "Angle = direction the wind blows from (north at the top), distance from centre = wind speed, colour = average concentration.")
+
+WD_START, WD_END = date(2022, 9, 1), date(2023, 3, 1)
+SPEED_EDGES = [0, 1, 2, 3, 4, 6, 11]
+DIRS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+wd = load_table("wind_direction", WD_START, WD_END)
+if wd.empty:
+    st.info("No wind direction data found in the database.")
+else:
+    aq = load_table("air_quality", WD_START, WD_END)
+    wind = aq.merge(wd, on="datetime").dropna(subset=["wd", "ws"])
+
+    # 16 direction sectors of 22.5 degrees, and wind speed bands
+    wind["sector"] = (((wind["wd"] + 11.25) // 22.5) % 16).astype(int)
+    wind["band"] = pd.cut(wind["ws"], SPEED_EDGES, labels=False, include_lowest=True, right=False)
+
+    def polar_plot(col, name):
+        g = (wind.dropna(subset=[col, "band"])
+                 .groupby(["sector", "band"])[col].agg(["mean", "count"]).reset_index())
+        g = g[g["count"] >= 3]                       # skip cells with too few hours
+        lo = [SPEED_EDGES[int(b)] for b in g["band"]]
+        hi = [SPEED_EDGES[int(b) + 1] for b in g["band"]]
+        fig = go.Figure(go.Barpolar(
+            theta=g["sector"] * 22.5,
+            r=[h - l for h, l in zip(hi, lo)],
+            base=lo,
+            width=22.5,
+            marker=dict(color=g["mean"], colorscale="YlOrRd", cmin=0,
+                        colorbar=dict(title="µg/m³"), line=dict(color="white", width=0.5)),
+            customdata=list(zip([DIRS[int(x)] for x in g["sector"]], lo, hi, g["mean"], g["count"])),
+            hovertemplate="%{customdata[0]}, %{customdata[1]}–%{customdata[2]} m/s<br>"
+                          "Average: %{customdata[3]:.1f} µg/m³<br>Hours: %{customdata[4]}<extra></extra>",
+        ))
+        fig.update_layout(
+            title=f"{name} by wind direction and speed",
+            height=460, margin=dict(t=60, b=30, l=30, r=30),
+            polar=dict(angularaxis=dict(direction="clockwise", rotation=90,
+                                        tickmode="array", tickvals=[0, 90, 180, 270],
+                                        ticktext=["N", "E", "S", "W"]),
+                       radialaxis=dict(range=[0, SPEED_EDGES[-1]], ticksuffix=" m/s",
+                                       tickvals=[2, 4, 6, 8, 10], angle=45, tickangle=45,
+                                       tickfont=dict(size=10))),
+        )
+        return fig
+
+    # site map + polar plot of the selected pollutant only
+    c_map, c_polar = st.columns([1, 1.6])
+    with c_map:
+        st.markdown("**Monitoring site**")
+        # newer Plotly versions use Scattermap; older ones only have Scattermapbox
+        marker_args = dict(lat=[SITE_LAT], lon=[SITE_LON], mode="markers+text",
+                           marker=dict(size=16, color="#D9692B"),
+                           text=["Henderson monitoring site"], textposition="top center",
+                           hovertext=["Henderson monitoring site (HEN)"], hoverinfo="text")
+        map_settings = dict(style="open-street-map", center=dict(lat=SITE_LAT, lon=SITE_LON), zoom=11)
+        if hasattr(go, "Scattermap"):
+            site_map = go.Figure(go.Scattermap(**marker_args))
+            site_map.update_layout(map=map_settings)
+        else:
+            site_map = go.Figure(go.Scattermapbox(**marker_args))
+            site_map.update_layout(mapbox=map_settings)
+        site_map.update_layout(height=380, margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
+        st.plotly_chart(site_map, width="stretch")
+        st.caption(f"Henderson, Auckland · {len(wind):,} hours with wind direction")
+    c_polar.plotly_chart(polar_plot(col, "NO₂" if pollutant == "NO2" else "PM10"), width="stretch")
+
+# ---------- model results (test set: last 20% of hours) ----------
+
+st.subheader("Forecast: actual vs predicted")
+
+# PM10 also has averaged forecasts (tutor feedback): averaging removes hourly instrument noise
+horizon = 1
+if pollutant == "PM10":
+    horizon = st.radio("PM10 forecast", [3, 1, 24], horizontal=True,
+                       format_func=lambda h: {1: "Next hour", 3: "Next 3-hour average (main)",
+                                              24: "Next 24-hour average"}[h])
+
+p_start, p_end = max(start, date(2017, 7, 15)), min(end_excl, date(2023, 3, 1))
+
+if p_start >= p_end:
+    st.info("Model predictions cover the test set (mid-2017/2019 to February 2023). Choose dates in that period to see them.")
+else:
+    if horizon == 1:
+        pred = load_table("predictions", p_start, p_end, pollutant=pollutant)
+    else:
+        pred = load_table("predictions_pm10_avg", p_start, p_end, horizon=horizon)
+        st.caption(f"Date = when the forecast is made. Actual = the real average PM10 over the following {horizon} hours.")
+    if pred.empty:
+        st.info("No predictions for this period.")
+    else:
+        model_name = pred["model"].iloc[0]
+        err = pred["predicted"] - pred["actual"]
+        mae = err.abs().mean()
+        rmse = np.sqrt((err ** 2).mean())
+        r2 = 1 - (err ** 2).sum() / ((pred["actual"] - pred["actual"].mean()) ** 2).sum()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Model", model_name)
+        m2.metric("MAE", f"{mae:.2f}")
+        m3.metric("RMSE", f"{rmse:.2f}")
+        m4.metric("R²", f"{r2:.3f}")
+
+        long = pred.melt(id_vars="datetime", value_vars=["actual", "predicted"],
+                         var_name="Series", value_name=pollutant)
+        fig = px.line(long, x="datetime", y=pollutant, color="Series",
+                      color_discrete_map={"actual": "blue", "predicted": "orange"},
+                      labels={pollutant: f"{pollutant} (µg/m³)", "datetime": "Date"})
+        fig.update_layout(height=380)
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Metrics are for the selected period only. Tip: zoom in on the chart to see hourly detail.")
+
+
+# The former historical single-date forecast demonstration has been removed
+# from the main dashboard. Historical model evaluation above is retained.
+# Saved models are still loaded by the future forecasting sections below.
+MODEL_DIR = Path(__file__).parent / "models"
+
+# ---------- validated, forward-only demonstration ----------
+# These four bundles are trained separately using the accompanying trainer.
+# They use past pollutant measurements + calendar features and DO NOT require
+# missing wind speed or future weather inputs.
+
+st.divider()
+st.header("Future Air Quality Forecast")
+st.caption(
+    "Next-hour predictions and 24 individual hourly forecasts for PM10 or NO₂. "
+    "An optional tab preserves the original next-24-hour average model. "
+    "Forecasts start AFTER the latest Supabase observation, so if the dataset ends "
+    "in February 2023 these are historical-origin forecasts, not current 2026 readings."
+)
+
+@st.cache_data(ttl=3600)
+def latest_forward_origin():
+    response = (get_client().table("air_quality").select("datetime")
+                .order("datetime", desc=True).limit(1).execute())
+    rows = response.data or []
+    return pd.Timestamp(rows[0]["datetime"]) if rows else None
+
+
+def next_forward_features(history, target, origin):
+    """Rebuild the exact feature names/order used in the in-notebook 4-model training cell.
+
+    The notebook defines rolling summaries at the forecast origin with full
+    3/24-hour windows. Only observations up to origin are accessed.
+    """
     other = "NO2" if target == "PM10" else "PM10"
-    X = pd.DataFrame(index=source.index)
-    X["hour"] = source.index.hour
-    X["dayofweek"] = source.index.dayofweek
-    X["month"] = source.index.month
-    X["dayofyear"] = source.index.dayofyear
+    now = pd.Timestamp(origin)
+    s = pd.to_numeric(history[target.lower()], errors="coerce")
+    other_s = pd.to_numeric(history[other.lower()], errors="coerce")
+    h3 = s.loc[now-pd.Timedelta(hours=2):now]
+    h24 = s.loc[now-pd.Timedelta(hours=23):now]
+    row = {
+        "hour": now.hour,
+        "dayofweek": now.dayofweek,
+        "month": now.month,
+        "dayofyear": now.dayofyear,
+    }
     for lag in (0, 1, 2, 3, 24):
-        X[f"{target}_lag{lag}"] = source[target].shift(lag)
-    X[f"{target}_roll3"] = source[target].rolling(3, min_periods=3).mean()
-    X[f"{target}_roll24"] = source[target].rolling(24, min_periods=24).mean()
-    X[f"{target}_std24"] = source[target].rolling(24, min_periods=24).std()
-    X[f"{other}_lag0"] = source[other]
-    X[f"{other}_lag1"] = source[other].shift(1)
-    return X
+        row[f"{target}_lag{lag}"] = s.get(now-pd.Timedelta(hours=lag), np.nan)
+    row[f"{target}_roll3"] = h3.mean() if h3.notna().sum() == 3 else np.nan
+    row[f"{target}_roll24"] = h24.mean() if h24.notna().sum() == 24 else np.nan
+    row[f"{target}_std24"] = h24.std() if h24.notna().sum() == 24 else np.nan
+    row[f"{other}_lag0"] = other_s.get(now, np.nan)
+    row[f"{other}_lag1"] = other_s.get(now-pd.Timedelta(hours=1), np.nan)
+    return pd.DataFrame([row], index=[now]).astype(float)
 
-model_dir = Path("models")
-model_dir.mkdir(exist_ok=True)
-results = []
-train_boundary = hourly_index[int(len(hourly_index)*0.60)]
-val_boundary = hourly_index[int(len(hourly_index)*0.80)]
 
-for pollutant in ("PM10", "NO2"):
-    full_features = features_at_origin(pollutant)
-    for horizon in range(2, 25):
-        # ONE future hourly value at t+h (not the average of a window).
-        y_future = source[pollutant].shift(-horizon)
-        actually_measured = observed[pollutant].shift(-horizon).fillna(False).astype(bool)
-        usable = full_features.notna().all(axis=1) & y_future.notna() & actually_measured
-        X, y = full_features.loc[usable], y_future.loc[usable]
-        target_time = X.index + pd.Timedelta(hours=horizon)
+def forward_graph(history, origin, target, value, hours):
+    """Blue historical line + orange star, following the supplied screenshot."""
+    past = history[target.lower()].loc[:origin].tail(25).dropna()
+    start = pd.Timestamp(origin) + pd.Timedelta(hours=1)
+    end = pd.Timestamp(origin) + pd.Timedelta(hours=hours)
+    dot_at = start if hours == 1 else end
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=past.index, y=past.values, name="Actual (historical)",
+        mode="lines+markers", line=dict(color="#1268D3", width=2.3),
+        marker=dict(size=5, color="#1268D3"),
+        hovertemplate="%{x|%d %b %Y %H:%M}<br>Actual: %{y:.2f} µg/m³<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=[dot_at], y=[value], name="Forecast",
+        mode="markers", marker=dict(symbol="star", size=16, color="#F39A1F"),
+        hovertemplate="%{x|%d %b %Y %H:%M}<br>Forecast: %{y:.2f} µg/m³<extra></extra>"
+    ))
+    if hours == 24:
+        fig.add_vrect(x0=start, x1=end, fillcolor="#F6A940", opacity=0.13,
+                      line_width=0,
+                      annotation_text="Future 24-hour mean", annotation_position="top left")
+    fig.add_shape(type="line", xref="x", yref="paper",
+                  x0=pd.Timestamp(origin).isoformat(),
+                  x1=pd.Timestamp(origin).isoformat(),
+                  y0=0, y1=1,
+                  line=dict(color="#777777", dash="dash", width=1.5))
+    fig.update_layout(
+        height=340, margin=dict(l=32, r=24, t=35, b=35),
+        xaxis_title="", yaxis_title=f"{target} (µg/m³)",
+        legend=dict(orientation="h", y=1.14, x=0), hovermode="closest"
+    )
+    fig.update_yaxes(zeroline=False)
+    return fig
 
-        # Exclude examples whose future target crosses the next split boundary.
-        train_mask = target_time < train_boundary
-        valid_mask = (X.index >= train_boundary) & (target_time < val_boundary)
-        test_mask = X.index >= val_boundary
-        if min(train_mask.sum(), valid_mask.sum(), test_mask.sum()) < 50:
-            raise ValueError(f"Not enough observations for {pollutant}, hour {horizon}")
 
-        config = dict(n_estimators=300, learning_rate=0.05,
-                      num_leaves=31, random_state=42, verbosity=-1)
-        model = LGBMRegressor(**config)
-        model.fit(X.loc[train_mask], y.loc[train_mask])
-        val_pred = np.clip(model.predict(X.loc[valid_mask]), 0, None)
-        validation_rmse = float(np.sqrt(mean_squared_error(y.loc[valid_mask], val_pred)))
+def forward_card(history, origin, target, hours):
+    label = "Next-hour concentration" if hours == 1 else "Next-24-hour average"
+    st.markdown(f"#### {target} — {label}")
+    path = MODEL_DIR / f"forward_{target}_{hours}h.pkl"
+    if not path.is_file():
+        st.warning(f"No validated forward model: {path.name}")
+        st.caption("Run the supplied training script first and deploy its model file.")
+        return
+    try:
+        bundle = joblib.load(path)
+        if not isinstance(bundle, dict) or not all(k in bundle for k in
+                ("model", "features", "target", "horizon_hours")):
+            raise ValueError("Saved file must contain model, features, target and horizon_hours.")
+        if bundle["target"] != target or int(bundle["horizon_hours"]) != hours:
+            raise ValueError("Bundle target or horizon does not match.")
+        row = next_forward_features(history, target, origin)
+        cols = list(bundle["features"])
+        missing = [c for c in cols if c not in row.columns]
+        if missing:
+            raise ValueError("Missing features: " + ", ".join(missing))
+        if row[cols].isna().any(axis=None):
+            raise ValueError("Required recent pollutant readings are missing. Choose a valid forecast origin or provide verified observations.")
+        if not hasattr(bundle["model"], "predict"):
+            raise ValueError("Saved model does not have a predict method.")
+        # Use the same features and column order as the notebook's saved model.
+        prediction = float(np.asarray(bundle["model"].predict(row[cols])).ravel()[0])
+        if not np.isfinite(prediction):
+            raise ValueError("Model returned a non-finite prediction.")
+        prediction = max(0., prediction)
+        first = pd.Timestamp(origin) + pd.Timedelta(hours=1)
+        last = pd.Timestamp(origin) + pd.Timedelta(hours=hours)
+        period = (f"{first:%d %b %Y %H:%M}" if hours == 1 else
+                  f"{first:%d %b %Y %H:%M} – {last:%d %b %Y %H:%M}")
+        st.caption("Predicted period: " + period)
+        st.metric("Forecast" if hours == 1 else "Forecast 24h mean",
+                  f"{prediction:.2f} µg/m³")
+        st.plotly_chart(forward_graph(history, origin, target, prediction, hours),
+                        width="stretch")
+        if hours == 24:
+            st.caption("Orange star = ONE predicted average over 24 hours, "
+                       "not 24 individual hourly concentrations.")
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
+        st.error(f"{target} {hours}h forecast unavailable: {exc}")
 
-        # Refit using train+validation; evaluate held-out test once.
-        final = LGBMRegressor(**config)
-        train_and_val = train_mask | valid_mask
-        final.fit(X.loc[train_and_val], y.loc[train_and_val])
-        test_pred = np.clip(final.predict(X.loc[test_mask]), 0, None)
-        test_actual = y.loc[test_mask]
-        mae = float(mean_absolute_error(test_actual, test_pred))
-        rmse = float(np.sqrt(mean_squared_error(test_actual, test_pred)))
-        r2 = float(r2_score(test_actual, test_pred))
 
-        path = model_dir / f"direct_{pollutant}_{horizon}h.pkl"
-        joblib.dump({
-            "model": final,
-            "features": list(X.columns),
-            "target": pollutant,
-            "horizon_hours": horizon,
-            "forecast_kind": "direct_hourly",
-            "training_through": str(X.index[train_and_val].max()),
-            "validation_RMSE": validation_rmse,
-            "held_out_test": {"MAE": mae, "RMSE": rmse, "R2": r2},
-        }, path)
-        results.append({"Pollutant": pollutant, "Hour Ahead": horizon,
-                        "Validation RMSE": validation_rmse,
-                        "Test MAE": mae, "Test RMSE": rmse, "Test R2": r2})
-        print(f"Saved {path.name} | test R² = {r2:.3f}")
+# ---------- 24 separate, direct hourly forecasts ----------
+# Existing forward_{pollutant}_1h.pkl is reused. New direct-horizon
+# models direct_{pollutant}_2h.pkl ... direct_{pollutant}_24h.pkl
+# must be trained before deployment. These are NOT 24h-mean models.
 
-result_table = pd.DataFrame(results)
-display(result_table.round(3))
-result_table.to_csv(model_dir / "direct_hourly_2_to_24_metrics.csv", index=False)
-print("Saved 46 models and metrics to", model_dir.resolve())
+def hourly_24_forecasts(history, origin, target):
+    features = next_forward_features(history, target, origin)
+    future_times, predictions = [], []
+    for horizon in range(1, 25):
+        filename = (MODEL_DIR / f"forward_{target}_1h.pkl" if horizon == 1
+                    else MODEL_DIR / f"direct_{target}_{horizon}h.pkl")
+        if not filename.is_file():
+            raise FileNotFoundError(
+                f"{filename.name} is missing. Train/upload the 2–24h hourly models first."
+            )
+        bundle = joblib.load(filename)
+        if not isinstance(bundle, dict) or not all(
+            k in bundle for k in ("model", "features", "target", "horizon_hours")
+        ):
+            raise ValueError(f"Invalid saved model bundle: {filename.name}")
+        if bundle["target"] != target or int(bundle["horizon_hours"]) != horizon:
+            raise ValueError(f"Incorrect forecast horizon in {filename.name}")
+        if horizon >= 2 and bundle.get("forecast_kind") != "direct_hourly":
+            raise ValueError(f"{filename.name} must be a direct hourly model, not a 24h mean model")
+        columns = list(bundle["features"])
+        if any(c not in features.columns for c in columns):
+            raise ValueError(f"Feature names do not match {filename.name}")
+        row = features[columns]
+        if not np.isfinite(row.to_numpy(dtype=float)).all():
+            raise ValueError("A required past pollutant reading is missing")
+        model = bundle["model"]
+        if not hasattr(model, "predict"):
+            raise ValueError(f"Model in {filename.name} has no predict method")
+        estimate = float(np.asarray(model.predict(row)).ravel()[0])
+        if not np.isfinite(estimate):
+            raise ValueError(f"Non-finite forecast from {filename.name}")
+        future_times.append(pd.Timestamp(origin) + pd.Timedelta(hours=horizon))
+        predictions.append(max(0.0, estimate))
+    return pd.Series(predictions, index=pd.DatetimeIndex(future_times), name=target)
+
+
+def hourly_24_plot(history, origin, target, predictions):
+    past = history[target.lower()].loc[:origin].tail(25).dropna()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=past.index, y=past.values,
+        name="Actual (historical)", mode="lines+markers",
+        line=dict(color="#1268D3", width=2.4),
+        marker=dict(size=5, color="#1268D3"),
+        hovertemplate="%{x|%d %b %Y, %H:%M}<br>Observed: %{y:.2f} µg/m³<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=predictions.index, y=predictions.values,
+        name="Forecast (24 hourly values)", mode="lines+markers",
+        line=dict(color="#F39A1F", width=2.8),
+        marker=dict(size=7, color="#F39A1F", symbol="diamond"),
+        hovertemplate="%{x|%d %b %Y, %H:%M}<br>Forecast: %{y:.2f} µg/m³<extra></extra>"
+    ))
+    # Mark the *last measured hour* rather than a future time on the x-axis.
+    # These plots deliberately contain no future actual/blue data points.
+    boundary = pd.Timestamp(origin).to_pydatetime()
+    fig.add_shape(type="line", xref="x", yref="paper",
+                  x0=boundary, x1=boundary, y0=0, y1=1,
+                  line=dict(color="#777777", dash="dash", width=1.5))
+    fig.add_annotation(x=boundary, y=1, xref="x", yref="paper",
+                       text="Last observed hour", showarrow=False,
+                       xanchor="right", yanchor="bottom",
+                       font=dict(size=11, color="#666666"))
+    fig.update_layout(
+        height=400, margin=dict(l=36, r=22, t=48, b=30),
+        xaxis_title="Date and time", yaxis_title=f"{target} (µg/m³)",
+        legend=dict(orientation="h", y=1.17, x=0),
+        hovermode="x unified"
+    )
+    fig.update_yaxes(rangemode="tozero")
+    return fig
+
+
+def hourly_24_card(history, origin, target):
+    st.subheader(f"{target} — 24 individual hourly forecasts")
+    st.caption("Each orange point represents one forecast hour, not a 24-hour average. "
+               "Blue points are measured values only, never future estimates.")
+    try:
+        values = hourly_24_forecasts(history, origin, target)
+        a, b, c = st.columns(3)
+        a.metric("Hour 1", f"{values.iloc[0]:.2f} µg/m³")
+        b.metric("Hour 12", f"{values.iloc[11]:.2f} µg/m³")
+        c.metric("Hour 24", f"{values.iloc[23]:.2f} µg/m³")
+        st.plotly_chart(hourly_24_plot(history, origin, target, values), width="stretch")
+        st.caption(f"Forecast period: {values.index[0]:%d %b %Y %H:%M} "
+                   f"to {values.index[-1]:%d %b %Y %H:%M}. "
+                   "These are direct forecasts from a single historical origin; "
+                   "no unknown future pollutant readings are fed into the model.")
+        with st.expander("Show all 24 hourly predictions"):
+            st.dataframe(pd.DataFrame({"Forecast time": values.index,
+                                       f"{target} predicted (µg/m³)": values.values}),
+                         hide_index=True, use_container_width=True)
+    except (FileNotFoundError, ValueError, KeyError, AttributeError,
+            TypeError, OSError) as exc:
+        st.warning(f"24-hour forecast line unavailable: {exc}")
+        st.caption("Keep the earlier dashboard sections unchanged; new hourly models "
+                   "need to be trained and uploaded before this chart can appear.")
+
+try:
+    end_time = latest_forward_origin()
+    if end_time is None:
+        st.warning("No observations available in Supabase.")
+    else:
+        # 48 prior hours and NO future records. Fill only absent timestamps, NOT values.
+        start_time = end_time - pd.Timedelta(hours=48)
+        window = load_table("air_quality", start_time.to_pydatetime(),
+                            (end_time+pd.Timedelta(microseconds=1)).to_pydatetime())
+        if window.empty:
+            st.warning("No historical data near the forecast origin.")
+        else:
+            window = (window.set_index("datetime").sort_index()
+                      .loc[lambda x: x.index <= end_time])
+            window = window[~window.index.duplicated(keep="last")]
+            window = window.reindex(pd.date_range(end_time-pd.Timedelta(hours=48),
+                                                  end_time, freq="h"))
+            if len(window) < 25 or not {'pm10','no2'}.issubset(window.columns):
+                st.warning("Not enough pollutant history to make a valid forecast.")
+            else:
+                st.write(f"**Forecast origin:** {end_time:%d %B %Y, %H:%M}")
+                st.caption("Models use only pollutant history and calendar information. "
+                           "Missing wind speed is not replaced with invented measurements.")
+                # Respect the existing pollutant filter in the sidebar.
+                # No extra selection is needed in the forecast section.
+                st.caption(f"Showing forecasts for: {pollutant}")
+                one_hour, hourly_day, mean_day = st.tabs(
+                    ["Next 1 Hour", "Next 24 Hours (hourly)", "24-hour Average (existing)"]
+                )
+                with one_hour:
+                    forward_card(window, end_time, pollutant, 1)
+                with hourly_day:
+                    hourly_24_card(window, end_time, pollutant)
+                with mean_day:
+                    forward_card(window, end_time, pollutant, 24)
+                st.info("Demonstration only. These are forecasts beyond the stored dataset "
+                        "endpoint, not live forecasts or official health warnings. "
+                        "The next-24-hour average is ONE mean value; the hourly tab requires "
+                        "24 separately predicted future values.")
+except Exception as exc:
+    st.warning("Cannot load forward forecast inputs from Supabase.")
+    st.caption(f"Details: {type(exc).__name__}: {exc}")
+
+st.caption("Data: Henderson air-quality monitoring site · Supabase REST API (read-only).")
