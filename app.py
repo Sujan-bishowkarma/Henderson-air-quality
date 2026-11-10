@@ -426,16 +426,15 @@ st.divider()
 st.header("Future Air Quality Forecast")
 future_model = st.selectbox(
     "Select future forecasting model",
-    PRESENTATION_MODELS,
-    index=PRESENTATION_MODELS.index("LightGBM"),
+    ["Linear Regression", "Decision Tree", "Random Forest", "XGBoost", "LightGBM"],
+    index=4,
     key="future_model_choice",
     help="Only models with compatible saved hourly forecast bundles can produce future predictions."
 )
 st.caption(f"Forecasting method selected: **{future_model}**. "
-           "LightGBM is the deployed default; other models need their own trained and tested hourly forecast files.")
+           "Five compatible models are available for future forecasting after their files are deployed. Prophet is available in historical model evaluation only.")
 st.caption(
     "Next-hour predictions and 24 individual hourly forecasts for PM10 or NO₂. "
-    "An optional tab preserves the original next-24-hour average model. "
     "Forecasts start AFTER the latest Supabase observation, so if the dataset ends "
     "in February 2023 these are historical-origin forecasts, not current 2026 readings."
 )
@@ -531,6 +530,17 @@ def forecast_file(target, horizon, method, kind="next"):
 def forward_card(history, origin, target, hours, method):
     label = "Next-hour concentration" if hours == 1 else "Next-24-hour average"
     st.markdown(f"#### {target} — {label} ({method})")
+    if method == "Prophet":
+        try:
+            result = prophet_future_values(origin, target)
+            prediction = float(result.iloc[hours - 1])
+            st.caption(f"Predicted period: {(pd.Timestamp(origin)+pd.Timedelta(hours=1)):%d %b %Y %H:%M}")
+            st.metric("Forecast", f"{prediction:.2f} µg/m³")
+            st.plotly_chart(forward_graph(history, origin, target, prediction, hours), width="stretch")
+            st.caption("Prophet uses learned time-series trend and seasonality, not lag-based regression features.")
+        except Exception as exc:
+            st.warning(f"Prophet forecast unavailable: {type(exc).__name__}: {exc}")
+        return
     path = forecast_file(target, hours, method, kind="next")
     if not path.is_file():
         st.info(f"{method} next-hour forecast is not deployed: {path.name}")
@@ -580,7 +590,27 @@ def forward_card(history, origin, target, hours, method):
 # models direct_{pollutant}_2h.pkl ... direct_{pollutant}_24h.pkl
 # must be trained before deployment. These are NOT 24h-mean models.
 
+@st.cache_resource(show_spinner=False)
+def load_prophet_forecast_model(target):
+    from prophet.serialize import model_from_json
+    path = MODEL_DIR / f"prophet_{target}.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing {path.name}; run the Prophet training cell and upload it.")
+    return model_from_json(path.read_text(encoding="utf-8"))
+
+
+def prophet_future_values(origin, target):
+    fitted = load_prophet_forecast_model(target)
+    times = pd.date_range(pd.Timestamp(origin) + pd.Timedelta(hours=1), periods=24, freq="h")
+    predicted = fitted.predict(pd.DataFrame({"ds": times}))["yhat"].to_numpy()
+    if len(predicted) != 24 or not np.isfinite(predicted).all():
+        raise ValueError("Prophet did not return 24 finite hourly predictions")
+    return pd.Series(np.maximum(0, predicted), index=times, name=target)
+
+
 def hourly_24_forecasts(history, origin, target, method):
+    if method == "Prophet":
+        return prophet_future_values(origin, target)
     features = next_forward_features(history, target, origin)
     future_times, predictions = [], []
     for horizon in range(1, 25):
@@ -682,7 +712,7 @@ def hourly_24_card(history, origin, target, method):
                                        f"{target} predicted (µg/m³)": values.values}),
                          hide_index=True, use_container_width=True)
     except (FileNotFoundError, ValueError, KeyError, AttributeError,
-            TypeError, OSError) as exc:
+            TypeError, OSError, ImportError) as exc:
         st.warning(f"{method} 24-hour forecast line unavailable: {exc}")
         st.caption("Keep the earlier dashboard sections unchanged; new hourly models "
                    "need to be trained and uploaded before this chart can appear.")
