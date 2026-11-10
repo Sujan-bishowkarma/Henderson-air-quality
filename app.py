@@ -272,24 +272,18 @@ else:
         st.caption(f"Henderson, Auckland · {len(wind):,} hours with wind direction")
     c_polar.plotly_chart(polar_plot(col, "NO₂" if pollutant == "NO2" else "PM10"), width="stretch")
 
-# ---------- model results (test set: last 20% of hours) ----------
+# ---------- model results: six algorithms' historical held-out predictions ----------
 
 st.subheader("Forecast: actual vs predicted")
+st.caption(
+    "Historical held-out test results (not future forecasts). "
+    "Select an algorithm to compare its own predictions with observed values."
+)
 
-# These are the six algorithms reported in the capstone presentation.
-# A model choice is never silently substituted with LightGBM results.
 PRESENTATION_MODELS = (
     "Linear Regression", "Decision Tree", "Random Forest",
     "XGBoost", "LightGBM", "Prophet"
 )
-MODEL_ALIASES = {
-    "Linear Regression": {"linear regression", "linearregression", "linear_regression", "lr"},
-    "Decision Tree": {"decision tree", "decisiontree", "decision_tree", "dt"},
-    "Random Forest": {"random forest", "randomforest", "random_forest", "rf"},
-    "XGBoost": {"xgboost", "xgb", "xg boost"},
-    "LightGBM": {"lightgbm", "light gbm", "lgbm", "lightgbm (huber)"},
-    "Prophet": {"prophet", "fbprophet"},
-}
 MODEL_CODES = {
     "Linear Regression": "linear_regression",
     "Decision Tree": "decision_tree",
@@ -299,80 +293,124 @@ MODEL_CODES = {
     "Prophet": "prophet",
 }
 
-def model_matches(series, model_name):
-    names = series.fillna("").astype(str).str.strip().str.lower()
-    aliases = MODEL_ALIASES[model_name]
-    # Handle descriptive identifiers such as 'LightGBM - best model'.
-    if model_name == "LightGBM":
-        return names.str.contains("lightgbm|lgbm", regex=True)
-    return names.isin(aliases)
+@st.cache_data(ttl=3600)
+def load_six_model_predictions(task, method, start_time, end_time):
+    """Fetch only the selected task/model/date range via the public read-only API.
+
+    Supabase PostgREST paginates at 1,000 rows per page. Filtering on the server
+    prevents fetching all 351,684 stored predictions when switching a model.
+    """
+    sb = get_client()
+    rows = []
+    offset = 0
+    page_size = 1000
+    while True:
+        batch = (
+            sb.table("model_comparison_predictions")
+            .select("datetime,actual,predicted")
+            .eq("task", task)
+            .eq("model", method)
+            .gte("datetime", pd.Timestamp(start_time).isoformat())
+            .lt("datetime", pd.Timestamp(end_time).isoformat())
+            .order("datetime")
+            .range(offset, offset + page_size - 1)
+            .execute()
+            .data or []
+        )
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result["datetime"] = pd.to_datetime(result["datetime"], errors="coerce")
+        result["actual"] = pd.to_numeric(result["actual"], errors="coerce")
+        result["predicted"] = pd.to_numeric(result["predicted"], errors="coerce")
+        result = result.dropna(subset=["datetime", "actual", "predicted"])
+        result = result.sort_values("datetime")
+    return result
 
 historical_model = st.selectbox(
     "Select evaluation model",
     PRESENTATION_MODELS,
     index=PRESENTATION_MODELS.index("LightGBM"),
     key="historical_model_choice",
-    help="Only previously stored test-set predictions are shown. No other model's values are substituted."
+    help="The graph and test-period metrics change with this model selection."
 )
 
-# PM10 also has historical averaged predictions in the Supabase test-set tables.
 horizon = 1
 if pollutant == "PM10":
-    horizon = st.radio("PM10 evaluation horizon", [3, 1, 24], horizontal=True,
-                       format_func=lambda h: {1: "Next hour", 3: "Next 3-hour average",
-                                              24: "Next 24-hour average"}[h])
+    horizon = st.radio(
+        "PM10 evaluation horizon",
+        [3, 1, 24],
+        horizontal=True,
+        format_func=lambda h: {
+            1: "Next hour",
+            3: "Next 3-hour average",
+            24: "Next 24-hour average",
+        }[h],
+    )
 
-p_start, p_end = max(start, date(2017, 7, 15)), min(end_excl, date(2023, 3, 1))
+task = ("NO2_next_hour" if pollutant == "NO2"
+        else {1: "PM10_next_hour",
+              3: "PM10_next_3h_average",
+              24: "PM10_next_24h_average"}[horizon])
 
-if p_start >= p_end:
-    st.info("Choose a date range within the historical test period to inspect model evaluation.")
-else:
-    if horizon == 1:
-        pred = load_table("predictions", p_start, p_end, pollutant=pollutant)
+st.caption(f"Evaluation target: {task.replace('_', ' ')} · "
+           "Metrics are recalculated for the selected date range.")
+
+try:
+    comparison = load_six_model_predictions(task, historical_model, start, end_excl)
+    if comparison.empty:
+        st.info(
+            "No stored historical test predictions for this model, "
+            "forecast target and selected date range. "
+            "Try September 2019 – February 2023."
+        )
     else:
-        pred = load_table("predictions_pm10_avg", p_start, p_end, horizon=horizon)
-        st.caption(f"Forecast origin = plotted date. Actual = observed average PM10 for the next {horizon} hours.")
-    if pred.empty:
-        st.info("No stored historical predictions for this pollutant, period, and horizon.")
-    elif "model" not in pred.columns:
-        st.warning("Stored predictions have no model identifier. Model comparison cannot be verified.")
-    else:
-        available = sorted(pred["model"].dropna().astype(str).unique().tolist())
-        selected = pred.loc[model_matches(pred["model"], historical_model)].copy()
-        if selected.empty:
-            st.info(
-                f"No stored {historical_model} predictions for {pollutant} at this horizon/date range. "
-                "This selector will show results once this model's real test-set predictions "
-                "are uploaded to the appropriate Supabase predictions table."
-            )
-            st.caption("Models currently represented in these stored results: " + ", ".join(available))
-        else:
-            # Avoid calculating erroneous metrics from rows with missing actual/prediction values.
-            selected["actual"] = pd.to_numeric(selected["actual"], errors="coerce")
-            selected["predicted"] = pd.to_numeric(selected["predicted"], errors="coerce")
-            selected = selected.dropna(subset=["actual", "predicted", "datetime"])
-            selected = selected.sort_values("datetime")
-            if selected.empty:
-                st.warning(f"No valid actual/predicted pairs for {historical_model}.")
-            else:
-                err = selected["predicted"] - selected["actual"]
-                mae = float(err.abs().mean())
-                rmse = float(np.sqrt((err ** 2).mean()))
-                denom = float(((selected["actual"] - selected["actual"].mean()) ** 2).sum())
-                r2 = float(1 - (err ** 2).sum() / denom) if denom > 0 else np.nan
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Model", historical_model)
-                m2.metric("MAE", f"{mae:.2f}")
-                m3.metric("RMSE", f"{rmse:.2f}")
-                m4.metric("R²", f"{r2:.3f}" if np.isfinite(r2) else "N/A")
-                long = selected.melt(id_vars="datetime", value_vars=["actual", "predicted"],
-                                     var_name="Series", value_name=pollutant)
-                fig = px.line(long, x="datetime", y=pollutant, color="Series",
-                              color_discrete_map={"actual": "#1268D3", "predicted": "#F39A1F"},
-                              labels={pollutant: f"{pollutant} (µg/m³)", "datetime": "Date"})
-                fig.update_layout(height=380)
-                st.plotly_chart(fig, width="stretch")
-                st.caption("Metrics calculated only for the selected model and displayed dates, not the full held-out test set.")
+        error = comparison["predicted"] - comparison["actual"]
+        mae = float(error.abs().mean())
+        rmse = float(np.sqrt(error.pow(2).mean()))
+        total = float((comparison["actual"] - comparison["actual"].mean()).pow(2).sum())
+        r2 = 1 - float(error.pow(2).sum()) / total if total > 0 else np.nan
+
+        a, b, c, d = st.columns(4)
+        a.metric("Model", historical_model)
+        b.metric("MAE", f"{mae:.3f} µg/m³")
+        c.metric("RMSE", f"{rmse:.3f} µg/m³")
+        d.metric("R²", f"{r2:.3f}" if np.isfinite(r2) else "N/A")
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=comparison["datetime"], y=comparison["actual"],
+            mode="lines", name="Actual (historical)",
+            line=dict(color="#1268D3", width=1.8)
+        ))
+        fig.add_trace(go.Scatter(
+            x=comparison["datetime"], y=comparison["predicted"],
+            mode="lines", name=f"Predicted ({historical_model})",
+            line=dict(color="#F39A1F", width=1.8)
+        ))
+        fig.update_layout(
+            height=385, xaxis_title="Forecast origin date and time",
+            yaxis_title=f"{pollutant} (µg/m³)",
+            legend=dict(orientation="h", y=1.12, x=0),
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig, width="stretch")
+        st.caption(
+            f"Displayed {len(comparison):,} historical test predictions from "
+            f"{comparison['datetime'].min():%d %b %Y} to "
+            f"{comparison['datetime'].max():%d %b %Y}. "
+            "These are NOT live forecasts. Actual values were measured after "
+            "the prediction origin and are shown only for model evaluation."
+        )
+except Exception as exc:
+    st.error("Could not load the model comparison predictions from Supabase.")
+    st.caption(
+        "Check that the table contains the exported CSV, RLS permits SELECT "
+        "for the dashboard's API role, and the selected date range includes test data."
+    )
 
 # The former historical single-date forecast demonstration has been removed
 # from the main dashboard. Historical model evaluation above is retained.
