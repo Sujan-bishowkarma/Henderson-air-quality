@@ -276,47 +276,103 @@ else:
 
 st.subheader("Forecast: actual vs predicted")
 
-# PM10 also has averaged forecasts (tutor feedback): averaging removes hourly instrument noise
+# These are the six algorithms reported in the capstone presentation.
+# A model choice is never silently substituted with LightGBM results.
+PRESENTATION_MODELS = (
+    "Linear Regression", "Decision Tree", "Random Forest",
+    "XGBoost", "LightGBM", "Prophet"
+)
+MODEL_ALIASES = {
+    "Linear Regression": {"linear regression", "linearregression", "linear_regression", "lr"},
+    "Decision Tree": {"decision tree", "decisiontree", "decision_tree", "dt"},
+    "Random Forest": {"random forest", "randomforest", "random_forest", "rf"},
+    "XGBoost": {"xgboost", "xgb", "xg boost"},
+    "LightGBM": {"lightgbm", "light gbm", "lgbm", "lightgbm (huber)"},
+    "Prophet": {"prophet", "fbprophet"},
+}
+MODEL_CODES = {
+    "Linear Regression": "linear_regression",
+    "Decision Tree": "decision_tree",
+    "Random Forest": "random_forest",
+    "XGBoost": "xgboost",
+    "LightGBM": "lightgbm",
+    "Prophet": "prophet",
+}
+
+def model_matches(series, model_name):
+    names = series.fillna("").astype(str).str.strip().str.lower()
+    aliases = MODEL_ALIASES[model_name]
+    # Handle descriptive identifiers such as 'LightGBM - best model'.
+    if model_name == "LightGBM":
+        return names.str.contains("lightgbm|lgbm", regex=True)
+    return names.isin(aliases)
+
+historical_model = st.selectbox(
+    "Select evaluation model",
+    PRESENTATION_MODELS,
+    index=PRESENTATION_MODELS.index("LightGBM"),
+    key="historical_model_choice",
+    help="Only previously stored test-set predictions are shown. No other model's values are substituted."
+)
+
+# PM10 also has historical averaged predictions in the Supabase test-set tables.
 horizon = 1
 if pollutant == "PM10":
-    horizon = st.radio("PM10 forecast", [3, 1, 24], horizontal=True,
-                       format_func=lambda h: {1: "Next hour", 3: "Next 3-hour average (main)",
+    horizon = st.radio("PM10 evaluation horizon", [3, 1, 24], horizontal=True,
+                       format_func=lambda h: {1: "Next hour", 3: "Next 3-hour average",
                                               24: "Next 24-hour average"}[h])
 
 p_start, p_end = max(start, date(2017, 7, 15)), min(end_excl, date(2023, 3, 1))
 
 if p_start >= p_end:
-    st.info("Model predictions cover the test set (mid-2017/2019 to February 2023). Choose dates in that period to see them.")
+    st.info("Choose a date range within the historical test period to inspect model evaluation.")
 else:
     if horizon == 1:
         pred = load_table("predictions", p_start, p_end, pollutant=pollutant)
     else:
         pred = load_table("predictions_pm10_avg", p_start, p_end, horizon=horizon)
-        st.caption(f"Date = when the forecast is made. Actual = the real average PM10 over the following {horizon} hours.")
+        st.caption(f"Forecast origin = plotted date. Actual = observed average PM10 for the next {horizon} hours.")
     if pred.empty:
-        st.info("No predictions for this period.")
+        st.info("No stored historical predictions for this pollutant, period, and horizon.")
+    elif "model" not in pred.columns:
+        st.warning("Stored predictions have no model identifier. Model comparison cannot be verified.")
     else:
-        model_name = pred["model"].iloc[0]
-        err = pred["predicted"] - pred["actual"]
-        mae = err.abs().mean()
-        rmse = np.sqrt((err ** 2).mean())
-        r2 = 1 - (err ** 2).sum() / ((pred["actual"] - pred["actual"].mean()) ** 2).sum()
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Model", model_name)
-        m2.metric("MAE", f"{mae:.2f}")
-        m3.metric("RMSE", f"{rmse:.2f}")
-        m4.metric("R²", f"{r2:.3f}")
-
-        long = pred.melt(id_vars="datetime", value_vars=["actual", "predicted"],
-                         var_name="Series", value_name=pollutant)
-        fig = px.line(long, x="datetime", y=pollutant, color="Series",
-                      color_discrete_map={"actual": "blue", "predicted": "orange"},
-                      labels={pollutant: f"{pollutant} (µg/m³)", "datetime": "Date"})
-        fig.update_layout(height=380)
-        st.plotly_chart(fig, width="stretch")
-        st.caption("Metrics are for the selected period only. Tip: zoom in on the chart to see hourly detail.")
-
+        available = sorted(pred["model"].dropna().astype(str).unique().tolist())
+        selected = pred.loc[model_matches(pred["model"], historical_model)].copy()
+        if selected.empty:
+            st.info(
+                f"No stored {historical_model} predictions for {pollutant} at this horizon/date range. "
+                "This selector will show results once this model's real test-set predictions "
+                "are uploaded to the appropriate Supabase predictions table."
+            )
+            st.caption("Models currently represented in these stored results: " + ", ".join(available))
+        else:
+            # Avoid calculating erroneous metrics from rows with missing actual/prediction values.
+            selected["actual"] = pd.to_numeric(selected["actual"], errors="coerce")
+            selected["predicted"] = pd.to_numeric(selected["predicted"], errors="coerce")
+            selected = selected.dropna(subset=["actual", "predicted", "datetime"])
+            selected = selected.sort_values("datetime")
+            if selected.empty:
+                st.warning(f"No valid actual/predicted pairs for {historical_model}.")
+            else:
+                err = selected["predicted"] - selected["actual"]
+                mae = float(err.abs().mean())
+                rmse = float(np.sqrt((err ** 2).mean()))
+                denom = float(((selected["actual"] - selected["actual"].mean()) ** 2).sum())
+                r2 = float(1 - (err ** 2).sum() / denom) if denom > 0 else np.nan
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Model", historical_model)
+                m2.metric("MAE", f"{mae:.2f}")
+                m3.metric("RMSE", f"{rmse:.2f}")
+                m4.metric("R²", f"{r2:.3f}" if np.isfinite(r2) else "N/A")
+                long = selected.melt(id_vars="datetime", value_vars=["actual", "predicted"],
+                                     var_name="Series", value_name=pollutant)
+                fig = px.line(long, x="datetime", y=pollutant, color="Series",
+                              color_discrete_map={"actual": "#1268D3", "predicted": "#F39A1F"},
+                              labels={pollutant: f"{pollutant} (µg/m³)", "datetime": "Date"})
+                fig.update_layout(height=380)
+                st.plotly_chart(fig, width="stretch")
+                st.caption("Metrics calculated only for the selected model and displayed dates, not the full held-out test set.")
 
 # The former historical single-date forecast demonstration has been removed
 # from the main dashboard. Historical model evaluation above is retained.
@@ -330,6 +386,15 @@ MODEL_DIR = Path(__file__).parent / "models"
 
 st.divider()
 st.header("Future Air Quality Forecast")
+future_model = st.selectbox(
+    "Select future forecasting model",
+    PRESENTATION_MODELS,
+    index=PRESENTATION_MODELS.index("LightGBM"),
+    key="future_model_choice",
+    help="Only models with compatible saved hourly forecast bundles can produce future predictions."
+)
+st.caption(f"Forecasting method selected: **{future_model}**. "
+           "LightGBM is the deployed default; other models need their own trained and tested hourly forecast files.")
 st.caption(
     "Next-hour predictions and 24 individual hourly forecasts for PM10 or NO₂. "
     "An optional tab preserves the original next-24-hour average model. "
@@ -413,13 +478,25 @@ def forward_graph(history, origin, target, value, hours):
     return fig
 
 
-def forward_card(history, origin, target, hours):
+def forecast_file(target, horizon, method, kind="next"):
+    """Safe, explicit file naming convention; never label LightGBM as another model."""
+    if method == "LightGBM":
+        basename = (f"forward_{target}_1h.pkl" if kind == "next"
+                    else f"direct_{target}_{horizon}h.pkl")
+    else:
+        code = MODEL_CODES[method]
+        basename = (f"forward_{code}_{target}_1h.pkl" if kind == "next"
+                    else f"direct_{code}_{target}_{horizon}h.pkl")
+    return MODEL_DIR / basename
+
+
+def forward_card(history, origin, target, hours, method):
     label = "Next-hour concentration" if hours == 1 else "Next-24-hour average"
-    st.markdown(f"#### {target} — {label}")
-    path = MODEL_DIR / f"forward_{target}_{hours}h.pkl"
+    st.markdown(f"#### {target} — {label} ({method})")
+    path = forecast_file(target, hours, method, kind="next")
     if not path.is_file():
-        st.warning(f"No validated forward model: {path.name}")
-        st.caption("Run the supplied training script first and deploy its model file.")
+        st.info(f"{method} next-hour forecast is not deployed: {path.name}")
+        st.caption("Train and test this algorithm on the same features/forecast target, then upload its model bundle. No forecast is shown until that is done.")
         return
     try:
         bundle = joblib.load(path)
@@ -428,6 +505,8 @@ def forward_card(history, origin, target, hours):
             raise ValueError("Saved file must contain model, features, target and horizon_hours.")
         if bundle["target"] != target or int(bundle["horizon_hours"]) != hours:
             raise ValueError("Bundle target or horizon does not match.")
+        if method != "LightGBM" and bundle.get("model_name") != method:
+            raise ValueError("Bundle's model_name must match selected forecasting model.")
         row = next_forward_features(history, target, origin)
         cols = list(bundle["features"])
         missing = [c for c in cols if c not in row.columns]
@@ -463,12 +542,12 @@ def forward_card(history, origin, target, hours):
 # models direct_{pollutant}_2h.pkl ... direct_{pollutant}_24h.pkl
 # must be trained before deployment. These are NOT 24h-mean models.
 
-def hourly_24_forecasts(history, origin, target):
+def hourly_24_forecasts(history, origin, target, method):
     features = next_forward_features(history, target, origin)
     future_times, predictions = [], []
     for horizon in range(1, 25):
-        filename = (MODEL_DIR / f"forward_{target}_1h.pkl" if horizon == 1
-                    else MODEL_DIR / f"direct_{target}_{horizon}h.pkl")
+        filename = forecast_file(target, horizon, method,
+                                 kind="next" if horizon == 1 else "direct")
         if not filename.is_file():
             raise FileNotFoundError(
                 f"{filename.name} is missing. Train/upload the 2–24h hourly models first."
@@ -482,6 +561,8 @@ def hourly_24_forecasts(history, origin, target):
             raise ValueError(f"Incorrect forecast horizon in {filename.name}")
         if horizon >= 2 and bundle.get("forecast_kind") != "direct_hourly":
             raise ValueError(f"{filename.name} must be a direct hourly model, not a 24h mean model")
+        if method != "LightGBM" and bundle.get("model_name") != method:
+            raise ValueError(f"{filename.name} has a different or unlabelled model type")
         columns = list(bundle["features"])
         if any(c not in features.columns for c in columns):
             raise ValueError(f"Feature names do not match {filename.name}")
@@ -543,12 +624,12 @@ def hourly_24_plot(history, origin, target, predictions):
     return fig
 
 
-def hourly_24_card(history, origin, target):
-    st.subheader(f"{target} — 24 individual hourly forecasts")
+def hourly_24_card(history, origin, target, method):
+    st.subheader(f"{target} — 24 individual hourly forecasts ({method})")
     st.caption("Each orange point represents one forecast hour, not a 24-hour average. "
                "Blue points are measured values only, never future estimates.")
     try:
-        values = hourly_24_forecasts(history, origin, target)
+        values = hourly_24_forecasts(history, origin, target, method)
         a, b, c = st.columns(3)
         a.metric("Hour 1", f"{values.iloc[0]:.2f} µg/m³")
         b.metric("Hour 12", f"{values.iloc[11]:.2f} µg/m³")
@@ -564,7 +645,7 @@ def hourly_24_card(history, origin, target):
                          hide_index=True, use_container_width=True)
     except (FileNotFoundError, ValueError, KeyError, AttributeError,
             TypeError, OSError) as exc:
-        st.warning(f"24-hour forecast line unavailable: {exc}")
+        st.warning(f"{method} 24-hour forecast line unavailable: {exc}")
         st.caption("Keep the earlier dashboard sections unchanged; new hourly models "
                    "need to be trained and uploaded before this chart can appear.")
 
@@ -598,9 +679,9 @@ try:
                     ["Next 1 Hour", "Next 24 Hours (hourly)"]
                 )
                 with one_hour:
-                    forward_card(window, end_time, pollutant, 1)
+                    forward_card(window, end_time, pollutant, 1, future_model)
                 with hourly_day:
-                    hourly_24_card(window, end_time, pollutant)
+                    hourly_24_card(window, end_time, pollutant, future_model)
                 st.info("Demonstration only. These are forecasts beyond the stored dataset "
                         "endpoint, not live forecasts or official health warnings. "
                         "The 24-hour tab requires "
